@@ -98,6 +98,46 @@ func (f *fakeGroupRepo) UpdateSortOrders(context.Context, []service.GroupSortOrd
 	return nil
 }
 
+type fakeAccountRepo struct {
+	service.AccountRepository
+	accounts []*service.Account
+}
+
+func (f *fakeAccountRepo) GetByID(_ context.Context, id int64) (*service.Account, error) {
+	for _, account := range f.accounts {
+		if account != nil && account.ID == id {
+			return account, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeAccountRepo) ListByGroup(_ context.Context, groupID int64) ([]service.Account, error) {
+	var result []service.Account
+	for _, account := range f.accounts {
+		if account == nil || !account.IsActive() {
+			continue
+		}
+		for _, binding := range account.AccountGroups {
+			if binding.GroupID == groupID {
+				result = append(result, *account)
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeAccountRepo) ListByPlatform(_ context.Context, platform string) ([]service.Account, error) {
+	var result []service.Account
+	for _, account := range f.accounts {
+		if account != nil && account.IsActive() && account.Platform == platform {
+			result = append(result, *account)
+		}
+	}
+	return result, nil
+}
+
 type fakeConcurrencyCache struct{}
 
 func (f *fakeConcurrencyCache) AcquireAccountSlot(context.Context, int64, int, string) (bool, error) {
@@ -144,9 +184,10 @@ func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*servi
 
 	schedulerCache := &fakeSchedulerCache{accounts: accounts}
 	schedulerSnapshot := service.NewSchedulerSnapshotService(schedulerCache, nil, nil, nil, nil)
+	accountRepo := &fakeAccountRepo{accounts: accounts}
 
 	gwSvc := service.NewGatewayService(
-		nil, // accountRepo (not used: scheduler snapshot hit)
+		accountRepo,
 		&fakeGroupRepo{group: group},
 		nil, // usageLogRepo
 		nil, // usageBillingRepo
@@ -363,4 +404,98 @@ func TestGatewayHandlerMessages_InterceptWarmup_AntigravityAccount_ForcePlatform
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, "msg_mock_warmup", resp["id"])
 	require.Equal(t, "claude-sonnet-4-5", resp["model"])
+}
+
+func TestGatewayHandlerMessages_NoAvailableAccountWaitsAndRetries(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(2003)
+	accountID := int64(1003)
+	resetAt := time.Now().Add(5 * time.Minute)
+
+	group := &service.Group{
+		ID:       groupID,
+		Hydrated: true,
+		Platform: service.PlatformAnthropic,
+		Status:   service.StatusActive,
+	}
+
+	account := &service.Account{
+		ID:       accountID,
+		Name:     "ag-wait",
+		Platform: service.PlatformAntigravity,
+		Type:     service.AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token":              "tok_wait",
+			"intercept_warmup_requests": true,
+		},
+		Extra: map[string]any{
+			"mixed_scheduling": true,
+		},
+		Concurrency:      1,
+		Priority:         1,
+		Status:           service.StatusActive,
+		Schedulable:      true,
+		RateLimitResetAt: &resetAt,
+		AccountGroups:    []service.AccountGroup{{AccountID: accountID, GroupID: groupID}},
+	}
+
+	h, cleanup := newTestGatewayHandler(t, group, []*service.Account{account})
+	defer cleanup()
+	h.cfg = &config.Config{
+		Gateway: config.GatewayConfig{
+			Scheduling: config.GatewaySchedulingConfig{
+				FallbackWaitTimeout: 50 * time.Millisecond,
+			},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	body := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 256,
+		"messages": [{"role":"user","content":[{"type":"text","text":"Warmup"}]}]
+	}`)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkey.Group, group))
+	c.Request = req
+
+	apiKey := &service.APIKey{
+		ID:      3003,
+		UserID:  4003,
+		GroupID: &groupID,
+		Status:  service.StatusActive,
+		User: &service.User{
+			ID:          4003,
+			Concurrency: 10,
+			Balance:     100,
+		},
+		Group: group,
+	}
+
+	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.UserID, Concurrency: 10})
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		account.RateLimitResetAt = nil
+	}()
+
+	start := time.Now()
+	h.Messages(c)
+	elapsed := time.Since(start)
+
+	require.Equal(t, 200, rec.Code)
+	require.GreaterOrEqual(t, elapsed, 45*time.Millisecond, "request should wait instead of failing immediately")
+
+	selected, ok := c.Get(opsAccountIDKey)
+	require.True(t, ok)
+	require.Equal(t, accountID, selected)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, "msg_mock_warmup", resp["id"])
 }

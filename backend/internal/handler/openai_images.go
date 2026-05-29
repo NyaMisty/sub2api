@@ -140,6 +140,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 	for {
 		reqLog.Debug("openai.images.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
@@ -157,6 +158,32 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+					c.Request.Context(),
+					apiKey.GroupID,
+					parsed.Model,
+					service.OpenAIUpstreamTransportHTTPSSE,
+					"",
+					parsed.RequiredCapability,
+					false,
+					err,
+				)
+				if retryErr != nil {
+					reqLog.Warn("openai.images.account_retry_check_failed", zap.Error(retryErr))
+				} else if retrySelection {
+					reqLog.Info("openai.images.account_select_waiting_for_available_account",
+						zap.String("model", parsed.Model),
+						zap.Duration("timeout", retryState.timeout),
+					)
+					waited, waitErr := retryState.Wait(c, h.concurrencyHelper, parsed.Stream, &streamStarted)
+					if waitErr != nil {
+						reqLog.Info("openai.images.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						continue
+					}
+				}
 				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available compatible accounts", streamStarted)
 				return
@@ -169,6 +196,32 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+				c.Request.Context(),
+				apiKey.GroupID,
+				parsed.Model,
+				service.OpenAIUpstreamTransportHTTPSSE,
+				"",
+				parsed.RequiredCapability,
+				false,
+				nil,
+			)
+			if retryErr != nil {
+				reqLog.Warn("openai.images.account_retry_check_failed", zap.Error(retryErr))
+			} else if retrySelection {
+				reqLog.Info("openai.images.account_select_waiting_for_available_account",
+					zap.String("model", parsed.Model),
+					zap.Duration("timeout", retryState.timeout),
+				)
+				waited, waitErr := retryState.Wait(c, h.concurrencyHelper, parsed.Stream, &streamStarted)
+				if waitErr != nil {
+					reqLog.Info("openai.images.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					continue
+				}
+			}
 			markOpsRoutingCapacityLimited(c)
 			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available compatible accounts", streamStarted)
 			return

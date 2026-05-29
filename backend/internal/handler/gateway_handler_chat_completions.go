@@ -175,11 +175,29 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	if groupPlatform == service.PlatformGemini {
 		fs = NewFailoverState(h.maxAccountSwitchesGemini, false)
 	}
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 	for {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
 		if err != nil {
 			if len(fs.FailedAccountIDs) == 0 {
+				retrySelection, retryErr := h.shouldRetryGatewayNoAvailableSelection(c.Request.Context(), apiKey.GroupID, reqModel, err)
+				if retryErr != nil {
+					reqLog.Warn("gateway.cc.account_retry_check_failed", zap.Error(retryErr))
+				} else if retrySelection {
+					reqLog.Info("gateway.cc.account_select_waiting_for_available_account",
+						zap.String("model", reqModel),
+						zap.Duration("timeout", retryState.timeout),
+					)
+					waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+					if waitErr != nil {
+						reqLog.Info("gateway.cc.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						continue
+					}
+				}
 				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts: "+err.Error())
 				return

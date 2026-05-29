@@ -369,11 +369,29 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		ctx := service.WithSingleAccountRetry(c.Request.Context(), true, h.metadataBridgeEnabled())
 		c.Request = c.Request.WithContext(ctx)
 	}
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 	for {
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 		if err != nil {
 			if len(fs.FailedAccountIDs) == 0 {
+				retrySelection, retryErr := h.shouldRetryGatewayNoAvailableSelection(c.Request.Context(), apiKey.GroupID, modelName, err)
+				if retryErr != nil {
+					reqLog.Warn("gemini.account_retry_check_failed", zap.Error(retryErr))
+				} else if retrySelection {
+					reqLog.Info("gemini.account_select_waiting_for_available_account",
+						zap.String("model", modelName),
+						zap.Duration("timeout", retryState.timeout),
+					)
+					waited, waitErr := retryState.Wait(c, geminiConcurrency, stream, &streamStarted)
+					if waitErr != nil {
+						reqLog.Info("gemini.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						continue
+					}
+				}
 				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
 				return

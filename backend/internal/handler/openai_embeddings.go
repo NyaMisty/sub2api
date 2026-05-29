@@ -105,6 +105,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 		maxAccountSwitches = 3
 	}
 	routingStart := time.Now()
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 	for {
 		selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
@@ -124,6 +125,32 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+					c.Request.Context(),
+					apiKey.GroupID,
+					reqModel,
+					service.OpenAIUpstreamTransportHTTPSSE,
+					service.OpenAIEndpointCapabilityEmbeddings,
+					"",
+					false,
+					err,
+				)
+				if retryErr != nil {
+					reqLog.Warn("openai_embeddings.account_retry_check_failed", zap.Error(retryErr))
+				} else if retrySelection {
+					reqLog.Info("openai_embeddings.account_select_waiting_for_available_account",
+						zap.String("model", reqModel),
+						zap.Duration("timeout", retryState.timeout),
+					)
+					waited, waitErr := retryState.Wait(c, h.concurrencyHelper, false, &streamStarted)
+					if waitErr != nil {
+						reqLog.Info("openai_embeddings.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						continue
+					}
+				}
 				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable")
 				return
@@ -136,6 +163,32 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+				c.Request.Context(),
+				apiKey.GroupID,
+				reqModel,
+				service.OpenAIUpstreamTransportHTTPSSE,
+				service.OpenAIEndpointCapabilityEmbeddings,
+				"",
+				false,
+				nil,
+			)
+			if retryErr != nil {
+				reqLog.Warn("openai_embeddings.account_retry_check_failed", zap.Error(retryErr))
+			} else if retrySelection {
+				reqLog.Info("openai_embeddings.account_select_waiting_for_available_account",
+					zap.String("model", reqModel),
+					zap.Duration("timeout", retryState.timeout),
+				)
+				waited, waitErr := retryState.Wait(c, h.concurrencyHelper, false, &streamStarted)
+				if waitErr != nil {
+					reqLog.Info("openai_embeddings.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					continue
+				}
+			}
 			markOpsRoutingCapacityLimited(c)
 			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 			return

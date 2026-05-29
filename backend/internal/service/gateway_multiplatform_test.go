@@ -96,13 +96,28 @@ func (m *mockAccountRepoForPlatform) ListWithFilters(ctx context.Context, params
 	return nil, nil, nil
 }
 func (m *mockAccountRepoForPlatform) ListByGroup(ctx context.Context, groupID int64) ([]Account, error) {
-	return nil, nil
+	var result []Account
+	for _, acc := range m.accounts {
+		if acc.IsActive() && accountBelongsToGroup(acc, groupID) {
+			result = append(result, acc)
+		}
+	}
+	return result, nil
 }
 func (m *mockAccountRepoForPlatform) ListActive(ctx context.Context) ([]Account, error) {
 	return nil, nil
 }
 func (m *mockAccountRepoForPlatform) ListByPlatform(ctx context.Context, platform string) ([]Account, error) {
-	return nil, nil
+	if m.listPlatformFunc != nil {
+		return m.listPlatformFunc(ctx, platform)
+	}
+	var result []Account
+	for _, acc := range m.accounts {
+		if acc.Platform == platform && acc.IsActive() {
+			result = append(result, acc)
+		}
+	}
+	return result, nil
 }
 func (m *mockAccountRepoForPlatform) UpdateLastUsed(ctx context.Context, id int64) error {
 	return nil

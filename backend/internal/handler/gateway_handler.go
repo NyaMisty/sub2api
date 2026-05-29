@@ -322,11 +322,30 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			ctx := service.WithSingleAccountRetry(c.Request.Context(), true, h.metadataBridgeEnabled())
 			c.Request = c.Request.WithContext(ctx)
 		}
+		retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 		for {
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
 			if err != nil {
 				if len(fs.FailedAccountIDs) == 0 {
+					retrySelection, retryErr := h.shouldRetryGatewayNoAvailableSelection(c.Request.Context(), apiKey.GroupID, reqModel, err)
+					if retryErr != nil {
+						reqLog.Warn("gateway.select_account_retry_check_failed", zap.Error(retryErr))
+					} else if retrySelection {
+						reqLog.Info("gateway.select_account_waiting_for_available_account",
+							zap.String("model", reqModel),
+							zap.String("platform", platform),
+							zap.Duration("timeout", retryState.timeout),
+						)
+						waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+						if waitErr != nil {
+							reqLog.Info("gateway.select_account_wait_interrupted", zap.Error(waitErr))
+							return
+						}
+						if waited {
+							continue
+						}
+					}
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 					reqLog.Warn("gateway.select_account_no_available",
 						zap.String("model", reqModel),
@@ -560,6 +579,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	for {
 		fs := NewFailoverState(h.maxAccountSwitches, hasBoundSession)
 		retryWithFallback := false
+		retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 		for {
 			// 选择支持该模型的账号
@@ -572,6 +592,24 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
 			if err != nil {
 				if len(fs.FailedAccountIDs) == 0 {
+					retrySelection, retryErr := h.shouldRetryGatewayNoAvailableSelection(c.Request.Context(), currentAPIKey.GroupID, reqModel, err)
+					if retryErr != nil {
+						reqLog.Warn("gateway.select_account_retry_check_failed", zap.Error(retryErr))
+					} else if retrySelection {
+						reqLog.Info("gateway.select_account_waiting_for_available_account",
+							zap.String("model", reqModel),
+							zap.String("platform", platform),
+							zap.Duration("timeout", retryState.timeout),
+						)
+						waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+						if waitErr != nil {
+							reqLog.Info("gateway.select_account_wait_interrupted", zap.Error(waitErr))
+							return
+						}
+						if waited {
+							continue
+						}
+					}
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 					reqLog.Warn("gateway.select_account_no_available",
 						zap.String("model", reqModel),
@@ -1724,11 +1762,33 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 		APIKeyID:  apiKey.ID,
 	}
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
+	dummyStreamStarted := false
 
-	// 选择支持该模型的账号
-	account, err := h.gatewayService.SelectAccountForModel(c.Request.Context(), apiKey.GroupID, sessionHash, parsedReq.Model)
-	if err != nil {
+	var account *service.Account
+	for {
+		account, err = h.gatewayService.SelectAccountForModel(c.Request.Context(), apiKey.GroupID, sessionHash, parsedReq.Model)
+		if err == nil {
+			break
+		}
 		reqLog.Warn("gateway.count_tokens_select_account_failed", zap.Error(err))
+		retrySelection, retryErr := h.shouldRetryGatewayNoAvailableSelection(c.Request.Context(), apiKey.GroupID, parsedReq.Model, err)
+		if retryErr != nil {
+			reqLog.Warn("gateway.count_tokens_retry_check_failed", zap.Error(retryErr))
+		} else if retrySelection {
+			reqLog.Info("gateway.count_tokens_waiting_for_available_account",
+				zap.String("model", parsedReq.Model),
+				zap.Duration("timeout", retryState.timeout),
+			)
+			waited, waitErr := retryState.Wait(c, h.concurrencyHelper, false, &dummyStreamStarted)
+			if waitErr != nil {
+				reqLog.Info("gateway.count_tokens_wait_interrupted", zap.Error(waitErr))
+				return
+			}
+			if waited {
+				continue
+			}
+		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable")
 		return

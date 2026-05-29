@@ -262,6 +262,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 	for {
 		// Select account supporting the requested model
@@ -283,6 +284,32 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+					c.Request.Context(),
+					apiKey.GroupID,
+					reqModel,
+					service.OpenAIUpstreamTransportAny,
+					service.OpenAIEndpointCapabilityChatCompletions,
+					"",
+					requireCompact,
+					err,
+				)
+				if retryErr != nil {
+					reqLog.Warn("openai.account_retry_check_failed", zap.Error(retryErr))
+				} else if retrySelection {
+					reqLog.Info("openai.account_select_waiting_for_available_account",
+						zap.String("model", reqModel),
+						zap.Duration("timeout", retryState.timeout),
+					)
+					waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+					if waitErr != nil {
+						reqLog.Info("openai.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						continue
+					}
+				}
 				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				if errors.Is(err, service.ErrNoAvailableCompactAccounts) {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available OpenAI accounts support /responses/compact", streamStarted)
@@ -299,6 +326,32 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+				c.Request.Context(),
+				apiKey.GroupID,
+				reqModel,
+				service.OpenAIUpstreamTransportAny,
+				service.OpenAIEndpointCapabilityChatCompletions,
+				"",
+				requireCompact,
+				nil,
+			)
+			if retryErr != nil {
+				reqLog.Warn("openai.account_retry_check_failed", zap.Error(retryErr))
+			} else if retrySelection {
+				reqLog.Info("openai.account_select_waiting_for_available_account",
+					zap.String("model", reqModel),
+					zap.Duration("timeout", retryState.timeout),
+				)
+				waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+				if waitErr != nil {
+					reqLog.Info("openai.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					continue
+				}
+			}
 			markOpsRoutingCapacityLimited(c)
 			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 			return
@@ -669,6 +722,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	effectiveMappedModel := preferredMappedModel
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
 
 	for {
 		currentRoutingModel := routingModel
@@ -693,11 +747,35 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
-				if err != nil {
-					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-					h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
-					return
+				retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+					c.Request.Context(),
+					apiKey.GroupID,
+					currentRoutingModel,
+					service.OpenAIUpstreamTransportAny,
+					service.OpenAIEndpointCapabilityChatCompletions,
+					"",
+					false,
+					err,
+				)
+				if retryErr != nil {
+					reqLog.Warn("openai_messages.account_retry_check_failed", zap.Error(retryErr))
+				} else if retrySelection {
+					reqLog.Info("openai_messages.account_select_waiting_for_available_account",
+						zap.String("model", currentRoutingModel),
+						zap.Duration("timeout", retryState.timeout),
+					)
+					waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+					if waitErr != nil {
+						reqLog.Info("openai_messages.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						continue
+					}
 				}
+				markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
+				h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
+				return
 			} else {
 				if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
@@ -708,6 +786,32 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+				c.Request.Context(),
+				apiKey.GroupID,
+				currentRoutingModel,
+				service.OpenAIUpstreamTransportAny,
+				service.OpenAIEndpointCapabilityChatCompletions,
+				"",
+				false,
+				nil,
+			)
+			if retryErr != nil {
+				reqLog.Warn("openai_messages.account_retry_check_failed", zap.Error(retryErr))
+			} else if retrySelection {
+				reqLog.Info("openai_messages.account_select_waiting_for_available_account",
+					zap.String("model", currentRoutingModel),
+					zap.Duration("timeout", retryState.timeout),
+				)
+				waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+				if waitErr != nil {
+					reqLog.Info("openai_messages.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					continue
+				}
+			}
 			markOpsRoutingCapacityLimited(c)
 			h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
 			return
@@ -1272,6 +1376,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	switchCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError
+	retryState := newSelectionRetryState(selectionRetryTimeoutFromConfig(h.cfg))
+	streamStarted := false
 
 	for {
 		reqLog.Debug("openai.websocket_account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
@@ -1291,6 +1397,34 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				zap.Error(err),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if len(failedAccountIDs) == 0 {
+				retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+					ctx,
+					apiKey.GroupID,
+					reqModel,
+					service.OpenAIUpstreamTransportResponsesWebsocketV2,
+					service.OpenAIEndpointCapabilityChatCompletions,
+					"",
+					false,
+					err,
+				)
+				if retryErr != nil {
+					reqLog.Warn("openai.websocket_account_retry_check_failed", zap.Error(retryErr))
+				} else if retrySelection {
+					reqLog.Info("openai.websocket_account_select_waiting_for_available_account",
+						zap.String("model", reqModel),
+						zap.Duration("timeout", retryState.timeout),
+					)
+					waited, waitErr := retryState.Wait(c, h.concurrencyHelper, false, &streamStarted)
+					if waitErr != nil {
+						reqLog.Info("openai.websocket_account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						continue
+					}
+				}
+			}
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(wsConn, lastFailoverErr)
 			} else {
@@ -1299,6 +1433,32 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			retrySelection, retryErr := h.shouldRetryOpenAINoAvailableSelection(
+				ctx,
+				apiKey.GroupID,
+				reqModel,
+				service.OpenAIUpstreamTransportResponsesWebsocketV2,
+				service.OpenAIEndpointCapabilityChatCompletions,
+				"",
+				false,
+				nil,
+			)
+			if retryErr != nil {
+				reqLog.Warn("openai.websocket_account_retry_check_failed", zap.Error(retryErr))
+			} else if retrySelection {
+				reqLog.Info("openai.websocket_account_select_waiting_for_available_account",
+					zap.String("model", reqModel),
+					zap.Duration("timeout", retryState.timeout),
+				)
+				waited, waitErr := retryState.Wait(c, h.concurrencyHelper, false, &streamStarted)
+				if waitErr != nil {
+					reqLog.Info("openai.websocket_account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					continue
+				}
+			}
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(wsConn, lastFailoverErr)
 			} else {
