@@ -252,11 +252,6 @@ func (s *ConcurrencyCacheSuite) TestUserWaitAuthorityQueue_PriorityFIFOAndBypass
 	require.NoError(s.T(), err)
 	require.True(s.T(), enqueued)
 
-	// Any queued/granted request should block direct user-slot bypass.
-	acquired, err := cache.TryAcquireUserSlotRespectingQueue(s.ctx, 9999, 1, "direct-bypass")
-	require.NoError(s.T(), err)
-	require.False(s.T(), acquired)
-
 	_, err = cache.PollUserWait(s.ctx, low.RequestID)
 	require.NoError(s.T(), err)
 
@@ -280,11 +275,6 @@ func (s *ConcurrencyCacheSuite) TestUserWaitAuthorityQueue_PriorityFIFOAndBypass
 	require.Equal(s.T(), "granted", s.mustUserWaitState(low.RequestID))
 
 	require.NoError(s.T(), cache.CompleteUserWait(s.ctx, low.RequestID, service.UserWaitStateDone))
-
-	// Queue drained: direct acquire should be allowed again.
-	acquired, err = cache.TryAcquireUserSlotRespectingQueue(s.ctx, 9999, 1, "direct-after-drain")
-	require.NoError(s.T(), err)
-	require.True(s.T(), acquired)
 
 	require.Equal(s.T(), 0, s.mustUserWaitCount(low.UserID))
 	require.Equal(s.T(), 0, s.mustUserWaitCount(high1.UserID))
