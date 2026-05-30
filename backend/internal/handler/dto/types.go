@@ -15,7 +15,6 @@ type User struct {
 	Role          string     `json:"role"`
 	Balance       float64    `json:"balance"`
 	Concurrency   int        `json:"concurrency"`
-	QueuePriority int        `json:"queue_priority"`
 	Status        string     `json:"status"`
 	AllowedGroups []int64    `json:"allowed_groups"`
 	LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
@@ -41,8 +40,9 @@ type User struct {
 type AdminUser struct {
 	User
 
-	Notes      string     `json:"notes"`
-	LastUsedAt *time.Time `json:"last_used_at"`
+	Notes         string     `json:"notes"`
+	QueuePriority int        `json:"queue_priority"`
+	LastUsedAt    *time.Time `json:"last_used_at"`
 	// GroupRates 用户专属分组倍率配置
 	// map[groupID]rateMultiplier
 	GroupRates map[int64]float64 `json:"group_rates,omitempty"`
