@@ -23,6 +23,8 @@ var (
 		local seqKey = KEYS[2]
 		local reqKey = KEYS[3]
 		local waitKey = KEYS[4]
+		local grantKey = KEYS[5]
+		local slotKey = KEYS[6]
 
 		local requestID = ARGV[1]
 		local userID = ARGV[2]
@@ -64,6 +66,9 @@ var (
 			'owner_instance', ownerInstance,
 			'queue_member', queueMember,
 			'queue_seq', seq,
+			'wait_key', waitKey,
+			'grant_key', grantKey,
+			'slot_key', slotKey,
 			'created_at_unix_ms', createdAtMs,
 			'deadline_unix_ms', deadlineMs,
 			'updated_at_unix_ms', createdAtMs,
@@ -84,9 +89,7 @@ var (
 		local maxConcurrency = tonumber(ARGV[1])
 		local ttl = tonumber(ARGV[2])
 		local requestID = ARGV[3]
-		local waitPrefix = ARGV[4]
-		local grantPrefix = ARGV[5]
-		local completeTTL = tonumber(ARGV[6])
+		local completeTTL = tonumber(ARGV[4])
 
 		local timeResult = redis.call('TIME')
 		local nowSec = tonumber(timeResult[1])
@@ -104,16 +107,22 @@ var (
 			end
 		end
 
-		local function releaseWaitCount(reqKey, userID)
+		local function releaseWaitCount(reqKey)
 			if redis.call('HGET', reqKey, 'wait_count_released') ~= '1' then
-				decrementIfPositive(waitPrefix .. userID)
+				local waitKey = redis.call('HGET', reqKey, 'wait_key')
+				if waitKey ~= false and waitKey ~= '' then
+					decrementIfPositive(waitKey)
+				end
 				redis.call('HSET', reqKey, 'wait_count_released', '1')
 			end
 		end
 
-		local function releaseGrant(reqKey, userID)
+		local function releaseGrant(reqKey)
 			if redis.call('HGET', reqKey, 'grant_released') ~= '1' then
-				decrementIfPositive(grantPrefix .. userID)
+				local grantKey = redis.call('HGET', reqKey, 'grant_key')
+				if grantKey ~= false and grantKey ~= '' then
+					decrementIfPositive(grantKey)
+				end
 				redis.call('HSET', reqKey, 'grant_released', '1')
 			end
 		end
@@ -129,13 +138,12 @@ var (
 					if state == false then
 						redis.call('ZREM', queueKey, member)
 					else
-						local userID = redis.call('HGET', reqKey, 'user_id')
 						local deadline = tonumber(redis.call('HGET', reqKey, 'deadline_unix_ms') or '0')
 						if deadline > 0 and nowMs >= deadline then
 							if state == 'granted' then
-								releaseGrant(reqKey, userID)
+								releaseGrant(reqKey)
 							end
-							releaseWaitCount(reqKey, userID)
+							releaseWaitCount(reqKey)
 							redis.call('HSET', reqKey, 'state', 'timed_out', 'updated_at_unix_ms', nowMs)
 							redis.call('ZREM', queueKey, member)
 							redis.call('EXPIRE', reqKey, completeTTL)
@@ -183,11 +191,8 @@ var (
 
 		local selfRequestID = ARGV[1]
 		local slotTTL = tonumber(ARGV[2])
-		local waitPrefix = ARGV[3]
-		local grantPrefix = ARGV[4]
-		local slotPrefix = ARGV[5]
-		local grantKeyTTL = tonumber(ARGV[6])
-		local completeTTL = tonumber(ARGV[7])
+		local grantKeyTTL = tonumber(ARGV[3])
+		local completeTTL = tonumber(ARGV[4])
 
 		local timeResult = redis.call('TIME')
 		local nowSec = tonumber(timeResult[1])
@@ -205,16 +210,22 @@ var (
 			end
 		end
 
-		local function releaseWaitCount(reqKey, userID)
+		local function releaseWaitCount(reqKey)
 			if redis.call('HGET', reqKey, 'wait_count_released') ~= '1' then
-				decrementIfPositive(waitPrefix .. userID)
+				local waitKey = redis.call('HGET', reqKey, 'wait_key')
+				if waitKey ~= false and waitKey ~= '' then
+					decrementIfPositive(waitKey)
+				end
 				redis.call('HSET', reqKey, 'wait_count_released', '1')
 			end
 		end
 
-		local function releaseGrant(reqKey, userID)
+		local function releaseGrant(reqKey)
 			if redis.call('HGET', reqKey, 'grant_released') ~= '1' then
-				decrementIfPositive(grantPrefix .. userID)
+				local grantKey = redis.call('HGET', reqKey, 'grant_key')
+				if grantKey ~= false and grantKey ~= '' then
+					decrementIfPositive(grantKey)
+				end
 				redis.call('HSET', reqKey, 'grant_released', '1')
 			end
 		end
@@ -232,13 +243,12 @@ var (
 				return reqID, reqKey, 'missing'
 			end
 
-			local userID = redis.call('HGET', reqKey, 'user_id')
 			local deadline = tonumber(redis.call('HGET', reqKey, 'deadline_unix_ms') or '0')
 			if deadline > 0 and nowMs >= deadline then
 				if state == 'granted' then
-					releaseGrant(reqKey, userID)
+					releaseGrant(reqKey)
 				end
-				releaseWaitCount(reqKey, userID)
+				releaseWaitCount(reqKey)
 				redis.call('HSET', reqKey, 'state', 'timed_out', 'updated_at_unix_ms', nowMs)
 				redis.call('ZREM', queueKey, member)
 				redis.call('EXPIRE', reqKey, completeTTL)
@@ -255,17 +265,20 @@ var (
 		end
 
 		local function eligibleForGrant(reqKey)
-			local userID = redis.call('HGET', reqKey, 'user_id')
 			local maxConcurrency = tonumber(redis.call('HGET', reqKey, 'max_concurrency') or '0')
 			if maxConcurrency <= 0 then
 				return true
 			end
 
-			local slotKey = slotPrefix .. userID
+			local slotKey = redis.call('HGET', reqKey, 'slot_key')
+			local grantKey = redis.call('HGET', reqKey, 'grant_key')
+			if slotKey == false or slotKey == '' or grantKey == false or grantKey == '' then
+				return false
+			end
 			local expireBefore = nowSec - slotTTL
 			redis.call('ZREMRANGEBYSCORE', slotKey, '-inf', expireBefore)
 			local active = tonumber(redis.call('ZCARD', slotKey) or '0')
-			local pending = tonumber(redis.call('GET', grantPrefix .. userID) or '0')
+			local pending = tonumber(redis.call('GET', grantKey) or '0')
 			return (active + pending) < maxConcurrency
 		end
 
@@ -276,14 +289,14 @@ var (
 			local reqID, reqKey, state = cleanupMember(member)
 			if reqID ~= nil and reqKey ~= nil then
 				if state == 'queued' and grantedRequestID == '' and eligibleForGrant(reqKey) then
-					local userID = redis.call('HGET', reqKey, 'user_id')
+					local grantKey = redis.call('HGET', reqKey, 'grant_key')
 					redis.call('HSET', reqKey,
 						'state', 'granted',
 						'granted_at_unix_ms', nowMs,
 						'updated_at_unix_ms', nowMs
 					)
-					redis.call('INCR', grantPrefix .. userID)
-					redis.call('EXPIRE', grantPrefix .. userID, grantKeyTTL)
+					redis.call('INCR', grantKey)
+					redis.call('EXPIRE', grantKey, grantKeyTTL)
 					grantedRequestID = reqID
 					state = 'granted'
 				end
@@ -300,10 +313,8 @@ var (
 		local queueKey = KEYS[1]
 		local reqKey = KEYS[2]
 
-		local waitPrefix = ARGV[1]
-		local grantPrefix = ARGV[2]
-		local finalState = ARGV[3]
-		local completeTTL = tonumber(ARGV[4])
+		local finalState = ARGV[1]
+		local completeTTL = tonumber(ARGV[2])
 
 		local timeResult = redis.call('TIME')
 		local nowMs = tonumber(timeResult[1]) * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
@@ -320,14 +331,19 @@ var (
 			return 0
 		end
 
-		local userID = redis.call('HGET', reqKey, 'user_id')
+		local waitKey = redis.call('HGET', reqKey, 'wait_key')
+		local grantKey = redis.call('HGET', reqKey, 'grant_key')
 		if state == 'granted' and redis.call('HGET', reqKey, 'grant_released') ~= '1' then
-			decrementIfPositive(grantPrefix .. userID)
+			if grantKey ~= false and grantKey ~= '' then
+				decrementIfPositive(grantKey)
+			end
 			redis.call('HSET', reqKey, 'grant_released', '1')
 		end
 
 		if redis.call('HGET', reqKey, 'wait_count_released') ~= '1' then
-			decrementIfPositive(waitPrefix .. userID)
+			if waitKey ~= false and waitKey ~= '' then
+				decrementIfPositive(waitKey)
+			end
 			redis.call('HSET', reqKey, 'wait_count_released', '1')
 		end
 
@@ -347,6 +363,10 @@ var (
 
 func userWaitRequestKey(requestID string) string {
 	return fmt.Sprintf("%s%s", userWaitRequestKeyPrefix, requestID)
+}
+
+func userWaitGrantKey(userID int64) string {
+	return fmt.Sprintf("%s%d", userWaitGrantKeyPrefix, userID)
 }
 
 func userWaitEntryTTLSeconds(deadline time.Time, waitTTLSeconds int) int {
@@ -387,8 +407,6 @@ func (c *concurrencyCache) TryAcquireUserSlotRespectingQueue(ctx context.Context
 		maxConcurrency,
 		c.slotTTLSeconds,
 		requestID,
-		waitQueueKeyPrefix,
-		userWaitGrantKeyPrefix,
 		userWaitCompletedEntryTTLInSec,
 	).Int()
 	if err != nil {
@@ -414,6 +432,8 @@ func (c *concurrencyCache) EnqueueUserWait(ctx context.Context, ticket *service.
 			userWaitSequenceKey,
 			userWaitRequestKey(ticket.RequestID),
 			waitQueueKey(ticket.UserID),
+			userWaitGrantKey(ticket.UserID),
+			userSlotKey(ticket.UserID),
 		},
 		ticket.RequestID,
 		ticket.UserID,
@@ -443,9 +463,6 @@ func (c *concurrencyCache) PollUserWait(ctx context.Context, requestID string) (
 		[]string{userWaitAuthorityQueueKey},
 		requestID,
 		c.slotTTLSeconds,
-		waitQueueKeyPrefix,
-		userWaitGrantKeyPrefix,
-		userSlotKeyPrefix,
 		c.waitQueueTTLSeconds,
 		userWaitCompletedEntryTTLInSec,
 	).Slice()
@@ -470,8 +487,6 @@ func (c *concurrencyCache) CompleteUserWait(ctx context.Context, requestID strin
 		ctx,
 		c.rdb,
 		[]string{userWaitAuthorityQueueKey, userWaitRequestKey(requestID)},
-		waitQueueKeyPrefix,
-		userWaitGrantKeyPrefix,
 		string(finalState),
 		userWaitCompletedEntryTTLInSec,
 	).Result()
