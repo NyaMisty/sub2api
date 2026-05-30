@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/config"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -1271,77 +1270,6 @@ func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Accou
 // HasPotentialAccountForSelection reports whether the current account pool still
 // contains at least one account that could serve the request after temporary
 // runtime blocks, rate limits, or queue pressure clear.
-func (s *OpenAIGatewayService) HasPotentialAccountForSelection(
-	ctx context.Context,
-	groupID *int64,
-	requestedModel string,
-	requiredTransport OpenAIUpstreamTransport,
-	requiredCapability OpenAIEndpointCapability,
-	requiredImageCapability OpenAIImagesCapability,
-	requireCompact bool,
-) (bool, error) {
-	if s == nil {
-		return false, nil
-	}
-	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
-		return false, nil
-	}
-	accounts, err := s.listPotentialOpenAIAccounts(ctx, groupID)
-	if err != nil {
-		return false, err
-	}
-	for i := range accounts {
-		account := &accounts[i]
-		if requestedModel != "" && !account.IsModelSupported(requestedModel) {
-			continue
-		}
-		if !accountSupportsOpenAICapabilities(account, requiredCapability, requiredImageCapability) {
-			continue
-		}
-		if requireCompact && openAICompactSupportTier(account) == 0 {
-			continue
-		}
-		if !s.isOpenAIAccountTransportCompatible(account, requiredTransport) {
-			continue
-		}
-		return true, nil
-	}
-	return false, nil
-}
-
-func (s *OpenAIGatewayService) listPotentialOpenAIAccounts(ctx context.Context, groupID *int64) ([]Account, error) {
-	if s == nil || s.accountRepo == nil {
-		return nil, nil
-	}
-	if s.schedulerSnapshot != nil {
-		accounts, err := s.listSchedulableAccounts(ctx, groupID)
-		if err == nil && len(accounts) > 0 {
-			return accounts, nil
-		}
-	}
-	if groupID != nil {
-		accounts, err := s.accountRepo.ListByGroup(ctx, *groupID)
-		if err != nil {
-			return nil, err
-		}
-		return accounts, nil
-	}
-	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
-		return s.accountRepo.ListByPlatform(ctx, PlatformOpenAI)
-	}
-	accounts, err := s.accountRepo.ListByPlatform(ctx, PlatformOpenAI)
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]Account, 0, len(accounts))
-	for _, account := range accounts {
-		if len(account.AccountGroups) == 0 {
-			filtered = append(filtered, account)
-		}
-	}
-	return filtered, nil
-}
-
 func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(accountID int64, success bool, firstTokenMs *int) {
 	scheduler := s.getOpenAIAccountScheduler(context.Background())
 	if scheduler == nil {

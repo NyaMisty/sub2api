@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
@@ -68,9 +67,6 @@ func shouldRetryNoAvailableSelectionError(err error) bool {
 	if err == nil {
 		return true
 	}
-	if errors.Is(err, service.ErrNoAvailableCompactAccounts) {
-		return false
-	}
 	if !isOpsNoAvailableAccountError(err) {
 		return false
 	}
@@ -78,10 +74,11 @@ func shouldRetryNoAvailableSelectionError(err error) bool {
 }
 
 func (h *GatewayHandler) shouldRetryGatewayNoAvailableSelection(ctx context.Context, groupID *int64, requestedModel string, err error) (bool, error) {
-	if h == nil || h.gatewayService == nil || !shouldRetryNoAvailableSelectionError(err) {
-		return false, nil
-	}
-	return h.gatewayService.HasPotentialAccountForRequest(ctx, groupID, requestedModel)
+	_ = h
+	_ = ctx
+	_ = groupID
+	_ = requestedModel
+	return shouldRetryNoAvailableSelectionError(err), nil
 }
 
 func (h *OpenAIGatewayHandler) shouldRetryOpenAINoAvailableSelection(
@@ -94,16 +91,13 @@ func (h *OpenAIGatewayHandler) shouldRetryOpenAINoAvailableSelection(
 	requireCompact bool,
 	err error,
 ) (bool, error) {
-	if h == nil || h.gatewayService == nil || !shouldRetryNoAvailableSelectionError(err) {
-		return false, nil
-	}
-	return h.gatewayService.HasPotentialAccountForSelection(
-		ctx,
-		groupID,
-		requestedModel,
-		requiredTransport,
-		requiredCapability,
-		requiredImageCapability,
-		requireCompact,
-	)
+	_ = h
+	_ = ctx
+	_ = groupID
+	_ = requestedModel
+	_ = requiredTransport
+	_ = requiredCapability
+	_ = requiredImageCapability
+	_ = requireCompact
+	return shouldRetryNoAvailableSelectionError(err), nil
 }
