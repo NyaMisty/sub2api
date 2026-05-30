@@ -50,7 +50,7 @@ var (
 		end
 
 		local seq = redis.call('INCR', seqKey)
-		local queueMember = string.format('%020d:%s', seq, requestID)
+		local queueMember = string.format('%020d|%s|%s', seq, requestID, reqKey)
 		redis.call('HSET', reqKey,
 			'request_id', requestID,
 			'user_id', userID,
@@ -84,18 +84,17 @@ var (
 		local maxConcurrency = tonumber(ARGV[1])
 		local ttl = tonumber(ARGV[2])
 		local requestID = ARGV[3]
-		local requestPrefix = ARGV[4]
-		local waitPrefix = ARGV[5]
-		local grantPrefix = ARGV[6]
-		local completeTTL = tonumber(ARGV[7])
+		local waitPrefix = ARGV[4]
+		local grantPrefix = ARGV[5]
+		local completeTTL = tonumber(ARGV[6])
 
 		local timeResult = redis.call('TIME')
 		local nowSec = tonumber(timeResult[1])
 		local nowMs = nowSec * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
 
-		local function requestIDFromMember(member)
-			local _, _, reqID = string.find(member, '^[^:]+:(.+)$')
-			return reqID
+		local function memberInfo(member)
+			local _, _, reqID, reqKey = string.find(member, '^[^|]+|([^|]+)|(.+)$')
+			return reqID, reqKey
 		end
 
 		local function decrementIfPositive(key)
@@ -122,11 +121,10 @@ var (
 		local function cleanupQueue()
 			local members = redis.call('ZRANGE', queueKey, 0, -1)
 			for _, member in ipairs(members) do
-				local reqID = requestIDFromMember(member)
-				if reqID == nil or reqID == '' then
+				local reqID, reqKey = memberInfo(member)
+				if reqID == nil or reqID == '' or reqKey == nil or reqKey == '' then
 					redis.call('ZREM', queueKey, member)
 				else
-					local reqKey = requestPrefix .. reqID
 					local state = redis.call('HGET', reqKey, 'state')
 					if state == false then
 						redis.call('ZREM', queueKey, member)
@@ -185,20 +183,19 @@ var (
 
 		local selfRequestID = ARGV[1]
 		local slotTTL = tonumber(ARGV[2])
-		local requestPrefix = ARGV[3]
-		local waitPrefix = ARGV[4]
-		local grantPrefix = ARGV[5]
-		local slotPrefix = ARGV[6]
-		local grantKeyTTL = tonumber(ARGV[7])
-		local completeTTL = tonumber(ARGV[8])
+		local waitPrefix = ARGV[3]
+		local grantPrefix = ARGV[4]
+		local slotPrefix = ARGV[5]
+		local grantKeyTTL = tonumber(ARGV[6])
+		local completeTTL = tonumber(ARGV[7])
 
 		local timeResult = redis.call('TIME')
 		local nowSec = tonumber(timeResult[1])
 		local nowMs = nowSec * 1000 + math.floor(tonumber(timeResult[2]) / 1000)
 
-		local function requestIDFromMember(member)
-			local _, _, reqID = string.find(member, '^[^:]+:(.+)$')
-			return reqID
+		local function memberInfo(member)
+			local _, _, reqID, reqKey = string.find(member, '^[^|]+|([^|]+)|(.+)$')
+			return reqID, reqKey
 		end
 
 		local function decrementIfPositive(key)
@@ -223,13 +220,12 @@ var (
 		end
 
 		local function cleanupMember(member)
-			local reqID = requestIDFromMember(member)
-			if reqID == nil or reqID == '' then
+			local reqID, reqKey = memberInfo(member)
+			if reqID == nil or reqID == '' or reqKey == nil or reqKey == '' then
 				redis.call('ZREM', queueKey, member)
 				return nil, nil, 'missing'
 			end
 
-			local reqKey = requestPrefix .. reqID
 			local state = redis.call('HGET', reqKey, 'state')
 			if state == false then
 				redis.call('ZREM', queueKey, member)
@@ -391,7 +387,6 @@ func (c *concurrencyCache) TryAcquireUserSlotRespectingQueue(ctx context.Context
 		maxConcurrency,
 		c.slotTTLSeconds,
 		requestID,
-		userWaitRequestKeyPrefix,
 		waitQueueKeyPrefix,
 		userWaitGrantKeyPrefix,
 		userWaitCompletedEntryTTLInSec,
@@ -448,7 +443,6 @@ func (c *concurrencyCache) PollUserWait(ctx context.Context, requestID string) (
 		[]string{userWaitAuthorityQueueKey},
 		requestID,
 		c.slotTTLSeconds,
-		userWaitRequestKeyPrefix,
 		waitQueueKeyPrefix,
 		userWaitGrantKeyPrefix,
 		userSlotKeyPrefix,
