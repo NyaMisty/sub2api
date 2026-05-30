@@ -78,8 +78,9 @@ func jwtAuth(authService *service.AuthService, userService jwtUserReader, activi
 		}
 
 		c.Set(string(ContextKeyUser), AuthSubject{
-			UserID:      user.ID,
-			Concurrency: user.Concurrency,
+			UserID:        user.ID,
+			Concurrency:   user.Concurrency,
+			QueuePriority: user.QueuePriority,
 		})
 		c.Set(string(ContextKeyUserRole), user.Role)
 		if activityToucher != nil {

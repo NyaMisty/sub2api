@@ -396,13 +396,14 @@ func createAdminUser(cfg *SetupConfig) (bool, string, error) {
 	}
 
 	admin := &service.User{
-		Email:       cfg.Admin.Email,
-		Role:        service.RoleAdmin,
-		Status:      service.StatusActive,
-		Balance:     0,
-		Concurrency: setupDefaultAdminConcurrency(),
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Email:         cfg.Admin.Email,
+		Role:          service.RoleAdmin,
+		Status:        service.StatusActive,
+		Balance:       0,
+		Concurrency:   setupDefaultAdminConcurrency(),
+		QueuePriority: service.DefaultUserQueuePriority,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 
 	if err := admin.SetPassword(cfg.Admin.Password); err != nil {

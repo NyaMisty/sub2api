@@ -38161,6 +38161,8 @@ type UserMutation struct {
 	addbalance                    *float64
 	concurrency                   *int
 	addconcurrency                *int
+	queue_priority                *int
+	addqueue_priority             *int
 	status                        *string
 	username                      *string
 	notes                         *string
@@ -38661,6 +38663,62 @@ func (m *UserMutation) AddedConcurrency() (r int, exists bool) {
 func (m *UserMutation) ResetConcurrency() {
 	m.concurrency = nil
 	m.addconcurrency = nil
+}
+
+// SetQueuePriority sets the "queue_priority" field.
+func (m *UserMutation) SetQueuePriority(i int) {
+	m.queue_priority = &i
+	m.addqueue_priority = nil
+}
+
+// QueuePriority returns the value of the "queue_priority" field in the mutation.
+func (m *UserMutation) QueuePriority() (r int, exists bool) {
+	v := m.queue_priority
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldQueuePriority returns the old "queue_priority" field's value of the User entity.
+// If the User object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserMutation) OldQueuePriority(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldQueuePriority is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldQueuePriority requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldQueuePriority: %w", err)
+	}
+	return oldValue.QueuePriority, nil
+}
+
+// AddQueuePriority adds i to the "queue_priority" field.
+func (m *UserMutation) AddQueuePriority(i int) {
+	if m.addqueue_priority != nil {
+		*m.addqueue_priority += i
+	} else {
+		m.addqueue_priority = &i
+	}
+}
+
+// AddedQueuePriority returns the value that was added to the "queue_priority" field in this mutation.
+func (m *UserMutation) AddedQueuePriority() (r int, exists bool) {
+	v := m.addqueue_priority
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetQueuePriority resets all changes to the "queue_priority" field.
+func (m *UserMutation) ResetQueuePriority() {
+	m.queue_priority = nil
+	m.addqueue_priority = nil
 }
 
 // SetStatus sets the "status" field.
@@ -40065,7 +40123,7 @@ func (m *UserMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.created_at != nil {
 		fields = append(fields, user.FieldCreatedAt)
 	}
@@ -40089,6 +40147,9 @@ func (m *UserMutation) Fields() []string {
 	}
 	if m.concurrency != nil {
 		fields = append(fields, user.FieldConcurrency)
+	}
+	if m.queue_priority != nil {
+		fields = append(fields, user.FieldQueuePriority)
 	}
 	if m.status != nil {
 		fields = append(fields, user.FieldStatus)
@@ -40159,6 +40220,8 @@ func (m *UserMutation) Field(name string) (ent.Value, bool) {
 		return m.Balance()
 	case user.FieldConcurrency:
 		return m.Concurrency()
+	case user.FieldQueuePriority:
+		return m.QueuePriority()
 	case user.FieldStatus:
 		return m.Status()
 	case user.FieldUsername:
@@ -40214,6 +40277,8 @@ func (m *UserMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldBalance(ctx)
 	case user.FieldConcurrency:
 		return m.OldConcurrency(ctx)
+	case user.FieldQueuePriority:
+		return m.OldQueuePriority(ctx)
 	case user.FieldStatus:
 		return m.OldStatus(ctx)
 	case user.FieldUsername:
@@ -40308,6 +40373,13 @@ func (m *UserMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetConcurrency(v)
+		return nil
+	case user.FieldQueuePriority:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetQueuePriority(v)
 		return nil
 	case user.FieldStatus:
 		v, ok := value.(string)
@@ -40428,6 +40500,9 @@ func (m *UserMutation) AddedFields() []string {
 	if m.addconcurrency != nil {
 		fields = append(fields, user.FieldConcurrency)
 	}
+	if m.addqueue_priority != nil {
+		fields = append(fields, user.FieldQueuePriority)
+	}
 	if m.addbalance_notify_threshold != nil {
 		fields = append(fields, user.FieldBalanceNotifyThreshold)
 	}
@@ -40449,6 +40524,8 @@ func (m *UserMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedBalance()
 	case user.FieldConcurrency:
 		return m.AddedConcurrency()
+	case user.FieldQueuePriority:
+		return m.AddedQueuePriority()
 	case user.FieldBalanceNotifyThreshold:
 		return m.AddedBalanceNotifyThreshold()
 	case user.FieldTotalRecharged:
@@ -40477,6 +40554,13 @@ func (m *UserMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddConcurrency(v)
+		return nil
+	case user.FieldQueuePriority:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddQueuePriority(v)
 		return nil
 	case user.FieldBalanceNotifyThreshold:
 		v, ok := value.(float64)
@@ -40588,6 +40672,9 @@ func (m *UserMutation) ResetField(name string) error {
 		return nil
 	case user.FieldConcurrency:
 		m.ResetConcurrency()
+		return nil
+	case user.FieldQueuePriority:
+		m.ResetQueuePriority()
 		return nil
 	case user.FieldStatus:
 		m.ResetStatus()

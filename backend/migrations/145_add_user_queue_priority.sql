@@ -1,0 +1,2 @@
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS queue_priority integer NOT NULL DEFAULT 100;

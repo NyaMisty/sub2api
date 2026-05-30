@@ -56,6 +56,63 @@ func (s *selectionRetryState) Wait(c *gin.Context, helper *ConcurrencyHelper, is
 	return true, nil
 }
 
+func (s *selectionRetryState) WaitForUserSlotReacquire(
+	c *gin.Context,
+	helper *ConcurrencyHelper,
+	userID int64,
+	userConcurrency int,
+	queuePriority int,
+	currentReleaseFunc func(),
+	isStream bool,
+	streamStarted *bool,
+) (func(), bool, error) {
+	if s == nil || helper == nil || c == nil {
+		return nil, false, nil
+	}
+	if !s.started {
+		s.deadline = time.Now().Add(s.timeout)
+		s.started = true
+	}
+
+	remaining := time.Until(s.deadline)
+	if remaining <= 0 {
+		return nil, false, nil
+	}
+
+	if !helper.SupportsAuthorityUserQueue() {
+		waited, err := s.Wait(c, helper, isStream, streamStarted)
+		if err != nil {
+			return currentReleaseFunc, false, err
+		}
+		return currentReleaseFunc, waited, nil
+	}
+
+	delay := s.backoff
+	if delay <= 0 {
+		delay = initialBackoff
+	}
+	if delay > remaining {
+		delay = remaining
+	}
+
+	releaseFunc, acquired, err := helper.WaitForNoAvailableUserSlotReacquire(
+		c,
+		userID,
+		userConcurrency,
+		queuePriority,
+		remaining,
+		delay,
+		currentReleaseFunc,
+		isStream,
+		streamStarted,
+	)
+	if acquired {
+		s.backoff = nextBackoff(delay)
+		return releaseFunc, true, nil
+	}
+	return nil, false, err
+}
+
 func selectionRetryTimeoutFromConfig(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.Gateway.Scheduling.FallbackWaitTimeout > 0 {
 		return cfg.Gateway.Scheduling.FallbackWaitTimeout

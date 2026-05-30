@@ -222,6 +222,75 @@ func (s *ConcurrencyCacheSuite) TestWaitQueue_DecrementNoNegative() {
 	require.GreaterOrEqual(s.T(), val, 0, "expected non-negative wait count")
 }
 
+func (s *ConcurrencyCacheSuite) TestUserWaitAuthorityQueue_PriorityFIFOAndBypassGuard() {
+	cache, ok := s.cache.(*concurrencyCache)
+	require.True(s.T(), ok)
+
+	newTicket := func(requestID string, userID int64, priority int) *service.UserWaitTicket {
+		return &service.UserWaitTicket{
+			RequestID:      requestID,
+			UserID:         userID,
+			MaxConcurrency: 1,
+			Priority:       priority,
+			Reason:         service.UserWaitReasonUserSlot,
+			OwnerInstance:  "integration-test",
+			Deadline:       time.Now().Add(time.Minute),
+		}
+	}
+
+	low := newTicket("low", 5001, 50)
+	high1 := newTicket("high-1", 5002, 10)
+	high2 := newTicket("high-2", 5003, 10)
+
+	enqueued, err := cache.EnqueueUserWait(s.ctx, low, 10)
+	require.NoError(s.T(), err)
+	require.True(s.T(), enqueued)
+	enqueued, err = cache.EnqueueUserWait(s.ctx, high1, 10)
+	require.NoError(s.T(), err)
+	require.True(s.T(), enqueued)
+	enqueued, err = cache.EnqueueUserWait(s.ctx, high2, 10)
+	require.NoError(s.T(), err)
+	require.True(s.T(), enqueued)
+
+	// Any queued/granted request should block direct user-slot bypass.
+	acquired, err := cache.TryAcquireUserSlotRespectingQueue(s.ctx, 9999, 1, "direct-bypass")
+	require.NoError(s.T(), err)
+	require.False(s.T(), acquired)
+
+	_, err = cache.PollUserWait(s.ctx, low.RequestID)
+	require.NoError(s.T(), err)
+
+	require.Equal(s.T(), "queued", s.mustUserWaitState(low.RequestID))
+	require.Equal(s.T(), "granted", s.mustUserWaitState(high1.RequestID))
+	require.Equal(s.T(), "queued", s.mustUserWaitState(high2.RequestID))
+
+	require.NoError(s.T(), cache.CompleteUserWait(s.ctx, high1.RequestID, service.UserWaitStateDone))
+
+	_, err = cache.PollUserWait(s.ctx, low.RequestID)
+	require.NoError(s.T(), err)
+
+	require.Equal(s.T(), "queued", s.mustUserWaitState(low.RequestID))
+	require.Equal(s.T(), "done", s.mustUserWaitState(high1.RequestID))
+	require.Equal(s.T(), "granted", s.mustUserWaitState(high2.RequestID))
+
+	require.NoError(s.T(), cache.CompleteUserWait(s.ctx, high2.RequestID, service.UserWaitStateDone))
+
+	_, err = cache.PollUserWait(s.ctx, low.RequestID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), "granted", s.mustUserWaitState(low.RequestID))
+
+	require.NoError(s.T(), cache.CompleteUserWait(s.ctx, low.RequestID, service.UserWaitStateDone))
+
+	// Queue drained: direct acquire should be allowed again.
+	acquired, err = cache.TryAcquireUserSlotRespectingQueue(s.ctx, 9999, 1, "direct-after-drain")
+	require.NoError(s.T(), err)
+	require.True(s.T(), acquired)
+
+	require.Equal(s.T(), 0, s.mustUserWaitCount(low.UserID))
+	require.Equal(s.T(), 0, s.mustUserWaitCount(high1.UserID))
+	require.Equal(s.T(), 0, s.mustUserWaitCount(high2.UserID))
+}
+
 func (s *ConcurrencyCacheSuite) TestAccountWaitQueue_IncrementAndDecrement() {
 	accountID := int64(30)
 	waitKey := fmt.Sprintf("%s%d", accountWaitKeyPrefix, accountID)
@@ -249,6 +318,21 @@ func (s *ConcurrencyCacheSuite) TestAccountWaitQueue_IncrementAndDecrement() {
 		require.NoError(s.T(), err, "Get waitKey")
 	}
 	require.Equal(s.T(), 1, val, "expected account wait count 1")
+}
+
+func (s *ConcurrencyCacheSuite) mustUserWaitState(requestID string) string {
+	state, err := s.rdb.HGet(s.ctx, userWaitRequestKey(requestID), "state").Result()
+	require.NoError(s.T(), err)
+	return state
+}
+
+func (s *ConcurrencyCacheSuite) mustUserWaitCount(userID int64) int {
+	val, err := s.rdb.Get(s.ctx, waitQueueKey(userID)).Int()
+	if errors.Is(err, redis.Nil) {
+		return 0
+	}
+	require.NoError(s.T(), err)
+	return val
 }
 
 func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots() {

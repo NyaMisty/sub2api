@@ -51,6 +51,8 @@ func (User) Fields() []ent.Field {
 			Default(0),
 		field.Int("concurrency").
 			Default(5),
+		field.Int("queue_priority").
+			Default(100),
 		field.String("status").
 			MaxLen(20).
 			Default(domain.StatusActive),

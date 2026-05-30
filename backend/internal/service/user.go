@@ -6,6 +6,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const DefaultUserQueuePriority = 100
+
 type User struct {
 	ID             int64
 	Email          string
@@ -20,6 +22,7 @@ type User struct {
 	Role           string
 	Balance        float64
 	Concurrency    int
+	QueuePriority  int
 	Status         string
 	AllowedGroups  []int64
 	TokenVersion   int64 // Incremented on password change to invalidate existing tokens

@@ -95,6 +95,11 @@ func Concurrency(v int) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldConcurrency, v))
 }
 
+// QueuePriority applies equality check predicate on the "queue_priority" field. It's identical to QueuePriorityEQ.
+func QueuePriority(v int) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldQueuePriority, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldStatus, v))
@@ -573,6 +578,46 @@ func ConcurrencyLT(v int) predicate.User {
 // ConcurrencyLTE applies the LTE predicate on the "concurrency" field.
 func ConcurrencyLTE(v int) predicate.User {
 	return predicate.User(sql.FieldLTE(FieldConcurrency, v))
+}
+
+// QueuePriorityEQ applies the EQ predicate on the "queue_priority" field.
+func QueuePriorityEQ(v int) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldQueuePriority, v))
+}
+
+// QueuePriorityNEQ applies the NEQ predicate on the "queue_priority" field.
+func QueuePriorityNEQ(v int) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldQueuePriority, v))
+}
+
+// QueuePriorityIn applies the In predicate on the "queue_priority" field.
+func QueuePriorityIn(vs ...int) predicate.User {
+	return predicate.User(sql.FieldIn(FieldQueuePriority, vs...))
+}
+
+// QueuePriorityNotIn applies the NotIn predicate on the "queue_priority" field.
+func QueuePriorityNotIn(vs ...int) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldQueuePriority, vs...))
+}
+
+// QueuePriorityGT applies the GT predicate on the "queue_priority" field.
+func QueuePriorityGT(v int) predicate.User {
+	return predicate.User(sql.FieldGT(FieldQueuePriority, v))
+}
+
+// QueuePriorityGTE applies the GTE predicate on the "queue_priority" field.
+func QueuePriorityGTE(v int) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldQueuePriority, v))
+}
+
+// QueuePriorityLT applies the LT predicate on the "queue_priority" field.
+func QueuePriorityLT(v int) predicate.User {
+	return predicate.User(sql.FieldLT(FieldQueuePriority, v))
+}
+
+// QueuePriorityLTE applies the LTE predicate on the "queue_priority" field.
+func QueuePriorityLTE(v int) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldQueuePriority, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

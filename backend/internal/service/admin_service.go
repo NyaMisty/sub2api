@@ -130,6 +130,7 @@ type CreateUserInput struct {
 	Notes         string
 	Balance       float64
 	Concurrency   int
+	QueuePriority *int
 	RPMLimit      int
 	AllowedGroups []int64
 }
@@ -141,6 +142,7 @@ type UpdateUserInput struct {
 	Notes         *string
 	Balance       *float64 // 使用指针区分"未提供"和"设置为0"
 	Concurrency   *int     // 使用指针区分"未提供"和"设置为0"
+	QueuePriority *int     // 使用指针区分"未提供"和"设置为0"
 	RPMLimit      *int     // 使用指针区分"未提供"和"设置为0"
 	Status        string
 	AllowedGroups *[]int64 // 使用指针区分"未提供"和"设置为空数组"
@@ -675,6 +677,10 @@ func (s *adminServiceImpl) GetUser(ctx context.Context, id int64) (*User, error)
 }
 
 func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInput) (*User, error) {
+	queuePriority := DefaultUserQueuePriority
+	if input.QueuePriority != nil {
+		queuePriority = *input.QueuePriority
+	}
 	user := &User{
 		Email:         input.Email,
 		Username:      input.Username,
@@ -682,6 +688,7 @@ func (s *adminServiceImpl) CreateUser(ctx context.Context, input *CreateUserInpu
 		Role:          RoleUser, // Always create as regular user, never admin
 		Balance:       input.Balance,
 		Concurrency:   input.Concurrency,
+		QueuePriority: queuePriority,
 		RPMLimit:      input.RPMLimit,
 		Status:        StatusActive,
 		AllowedGroups: input.AllowedGroups,
@@ -734,6 +741,7 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	}
 
 	oldConcurrency := user.Concurrency
+	oldQueuePriority := user.QueuePriority
 	oldStatus := user.Status
 	oldRole := user.Role
 	oldRPMLimit := user.RPMLimit
@@ -762,6 +770,10 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 		user.Concurrency = *input.Concurrency
 	}
 
+	if input.QueuePriority != nil {
+		user.QueuePriority = *input.QueuePriority
+	}
+
 	if input.RPMLimit != nil {
 		user.RPMLimit = *input.RPMLimit
 	}
@@ -784,7 +796,7 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 	if s.authCacheInvalidator != nil {
 		// RPMLimit 直接参与 billing_cache_service.checkRPM 的三级级联，
 		// 不失效缓存会让修改在一个 L2 TTL 内失去效果。
-		if user.Concurrency != oldConcurrency || user.Status != oldStatus || user.Role != oldRole || user.RPMLimit != oldRPMLimit {
+		if user.Concurrency != oldConcurrency || user.QueuePriority != oldQueuePriority || user.Status != oldStatus || user.Role != oldRole || user.RPMLimit != oldRPMLimit {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, user.ID)
 		}
 	}

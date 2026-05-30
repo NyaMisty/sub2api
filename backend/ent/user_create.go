@@ -130,6 +130,20 @@ func (_c *UserCreate) SetNillableConcurrency(v *int) *UserCreate {
 	return _c
 }
 
+// SetQueuePriority sets the "queue_priority" field.
+func (_c *UserCreate) SetQueuePriority(v int) *UserCreate {
+	_c.mutation.SetQueuePriority(v)
+	return _c
+}
+
+// SetNillableQueuePriority sets the "queue_priority" field if the given value is not nil.
+func (_c *UserCreate) SetNillableQueuePriority(v *int) *UserCreate {
+	if v != nil {
+		_c.SetQueuePriority(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *UserCreate) SetStatus(v string) *UserCreate {
 	_c.mutation.SetStatus(v)
@@ -598,6 +612,10 @@ func (_c *UserCreate) defaults() error {
 		v := user.DefaultConcurrency
 		_c.mutation.SetConcurrency(v)
 	}
+	if _, ok := _c.mutation.QueuePriority(); !ok {
+		v := user.DefaultQueuePriority
+		_c.mutation.SetQueuePriority(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := user.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -678,6 +696,9 @@ func (_c *UserCreate) check() error {
 	}
 	if _, ok := _c.mutation.Concurrency(); !ok {
 		return &ValidationError{Name: "concurrency", err: errors.New(`ent: missing required field "User.concurrency"`)}
+	}
+	if _, ok := _c.mutation.QueuePriority(); !ok {
+		return &ValidationError{Name: "queue_priority", err: errors.New(`ent: missing required field "User.queue_priority"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "User.status"`)}
@@ -782,6 +803,10 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Concurrency(); ok {
 		_spec.SetField(user.FieldConcurrency, field.TypeInt, value)
 		_node.Concurrency = value
+	}
+	if value, ok := _c.mutation.QueuePriority(); ok {
+		_spec.SetField(user.FieldQueuePriority, field.TypeInt, value)
+		_node.QueuePriority = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(user.FieldStatus, field.TypeString, value)
@@ -1209,6 +1234,24 @@ func (u *UserUpsert) AddConcurrency(v int) *UserUpsert {
 	return u
 }
 
+// SetQueuePriority sets the "queue_priority" field.
+func (u *UserUpsert) SetQueuePriority(v int) *UserUpsert {
+	u.Set(user.FieldQueuePriority, v)
+	return u
+}
+
+// UpdateQueuePriority sets the "queue_priority" field to the value that was provided on create.
+func (u *UserUpsert) UpdateQueuePriority() *UserUpsert {
+	u.SetExcluded(user.FieldQueuePriority)
+	return u
+}
+
+// AddQueuePriority adds v to the "queue_priority" field.
+func (u *UserUpsert) AddQueuePriority(v int) *UserUpsert {
+	u.Add(user.FieldQueuePriority, v)
+	return u
+}
+
 // SetStatus sets the "status" field.
 func (u *UserUpsert) SetStatus(v string) *UserUpsert {
 	u.Set(user.FieldStatus, v)
@@ -1598,6 +1641,27 @@ func (u *UserUpsertOne) AddConcurrency(v int) *UserUpsertOne {
 func (u *UserUpsertOne) UpdateConcurrency() *UserUpsertOne {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdateConcurrency()
+	})
+}
+
+// SetQueuePriority sets the "queue_priority" field.
+func (u *UserUpsertOne) SetQueuePriority(v int) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.SetQueuePriority(v)
+	})
+}
+
+// AddQueuePriority adds v to the "queue_priority" field.
+func (u *UserUpsertOne) AddQueuePriority(v int) *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.AddQueuePriority(v)
+	})
+}
+
+// UpdateQueuePriority sets the "queue_priority" field to the value that was provided on create.
+func (u *UserUpsertOne) UpdateQueuePriority() *UserUpsertOne {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateQueuePriority()
 	})
 }
 
@@ -2194,6 +2258,27 @@ func (u *UserUpsertBulk) AddConcurrency(v int) *UserUpsertBulk {
 func (u *UserUpsertBulk) UpdateConcurrency() *UserUpsertBulk {
 	return u.Update(func(s *UserUpsert) {
 		s.UpdateConcurrency()
+	})
+}
+
+// SetQueuePriority sets the "queue_priority" field.
+func (u *UserUpsertBulk) SetQueuePriority(v int) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.SetQueuePriority(v)
+	})
+}
+
+// AddQueuePriority adds v to the "queue_priority" field.
+func (u *UserUpsertBulk) AddQueuePriority(v int) *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.AddQueuePriority(v)
+	})
+}
+
+// UpdateQueuePriority sets the "queue_priority" field to the value that was provided on create.
+func (u *UserUpsertBulk) UpdateQueuePriority() *UserUpsertBulk {
+	return u.Update(func(s *UserUpsert) {
+		s.UpdateQueuePriority()
 	})
 }
 
