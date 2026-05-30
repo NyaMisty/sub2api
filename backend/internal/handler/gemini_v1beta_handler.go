@@ -205,46 +205,24 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	// For Gemini native API, do not send Claude-style ping frames.
 	geminiConcurrency := NewConcurrencyHelper(h.concurrencyHelper.concurrencyService, SSEPingFormatNone, 0)
 
-	// 0) wait queue check
-	maxWait := service.CalculateMaxWait(authSubject.Concurrency)
-	canWait, err := geminiConcurrency.IncrementWaitCount(c.Request.Context(), authSubject.UserID, maxWait)
-	waitCounted := false
-	if err != nil {
-		reqLog.Warn("gemini.user_wait_counter_increment_failed", zap.Error(err))
-	} else if !canWait {
-		reqLog.Info("gemini.user_wait_queue_full", zap.Int("max_wait", maxWait))
-		googleError(c, http.StatusTooManyRequests, "Too many pending requests, please retry later")
-		return
-	}
-	if err == nil && canWait {
-		waitCounted = true
-	}
-	defer func() {
-		if waitCounted {
-			geminiConcurrency.DecrementWaitCount(c.Request.Context(), authSubject.UserID)
-		}
-	}()
-
 	// 1) user concurrency slot
 	streamStarted := false
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
 	}
-	userReleaseFunc, err := geminiConcurrency.AcquireUserSlotWithWait(c, authSubject.UserID, authSubject.Concurrency, stream, &streamStarted)
+	userReleaseFunc, err := geminiConcurrency.AcquireUserSlotWithWait(c, authSubject.UserID, authSubject.Concurrency, authSubject.QueuePriority, stream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
 		googleError(c, http.StatusTooManyRequests, err.Error())
 		return
 	}
-	if waitCounted {
-		geminiConcurrency.DecrementWaitCount(c.Request.Context(), authSubject.UserID)
-		waitCounted = false
-	}
 	// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏
 	userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), userReleaseFunc)
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
-	}
+	defer func() {
+		if userReleaseFunc != nil {
+			userReleaseFunc()
+		}
+	}()
 
 	// 2) billing eligibility check (after wait)
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
@@ -383,12 +361,26 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 						zap.String("model", modelName),
 						zap.Duration("timeout", retryState.timeout),
 					)
-					waited, waitErr := retryState.Wait(c, geminiConcurrency, stream, &streamStarted)
+					newUserReleaseFunc, waited, waitErr := retryState.WaitForUserSlotReacquire(
+						c,
+						geminiConcurrency,
+						authSubject.UserID,
+						authSubject.Concurrency,
+						authSubject.QueuePriority,
+						userReleaseFunc,
+						stream,
+						&streamStarted,
+					)
 					if waitErr != nil {
 						reqLog.Info("gemini.account_select_wait_interrupted", zap.Error(waitErr))
 						return
 					}
 					if waited {
+						if geminiConcurrency.SupportsAuthorityUserQueue() {
+							userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+						} else {
+							userReleaseFunc = newUserReleaseFunc
+						}
 						continue
 					}
 				}

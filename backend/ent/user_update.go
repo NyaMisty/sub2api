@@ -150,6 +150,27 @@ func (_u *UserUpdate) AddConcurrency(v int) *UserUpdate {
 	return _u
 }
 
+// SetQueuePriority sets the "queue_priority" field.
+func (_u *UserUpdate) SetQueuePriority(v int) *UserUpdate {
+	_u.mutation.ResetQueuePriority()
+	_u.mutation.SetQueuePriority(v)
+	return _u
+}
+
+// SetNillableQueuePriority sets the "queue_priority" field if the given value is not nil.
+func (_u *UserUpdate) SetNillableQueuePriority(v *int) *UserUpdate {
+	if v != nil {
+		_u.SetQueuePriority(*v)
+	}
+	return _u
+}
+
+// AddQueuePriority adds value to the "queue_priority" field.
+func (_u *UserUpdate) AddQueuePriority(v int) *UserUpdate {
+	_u.mutation.AddQueuePriority(v)
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *UserUpdate) SetStatus(v string) *UserUpdate {
 	_u.mutation.SetStatus(v)
@@ -1003,6 +1024,12 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.AddedConcurrency(); ok {
 		_spec.AddField(user.FieldConcurrency, field.TypeInt, value)
 	}
+	if value, ok := _u.mutation.QueuePriority(); ok {
+		_spec.SetField(user.FieldQueuePriority, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedQueuePriority(); ok {
+		_spec.AddField(user.FieldQueuePriority, field.TypeInt, value)
+	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(user.FieldStatus, field.TypeString, value)
 	}
@@ -1796,6 +1823,27 @@ func (_u *UserUpdateOne) SetNillableConcurrency(v *int) *UserUpdateOne {
 // AddConcurrency adds value to the "concurrency" field.
 func (_u *UserUpdateOne) AddConcurrency(v int) *UserUpdateOne {
 	_u.mutation.AddConcurrency(v)
+	return _u
+}
+
+// SetQueuePriority sets the "queue_priority" field.
+func (_u *UserUpdateOne) SetQueuePriority(v int) *UserUpdateOne {
+	_u.mutation.ResetQueuePriority()
+	_u.mutation.SetQueuePriority(v)
+	return _u
+}
+
+// SetNillableQueuePriority sets the "queue_priority" field if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableQueuePriority(v *int) *UserUpdateOne {
+	if v != nil {
+		_u.SetQueuePriority(*v)
+	}
+	return _u
+}
+
+// AddQueuePriority adds value to the "queue_priority" field.
+func (_u *UserUpdateOne) AddQueuePriority(v int) *UserUpdateOne {
+	_u.mutation.AddQueuePriority(v)
 	return _u
 }
 
@@ -2681,6 +2729,12 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 	}
 	if value, ok := _u.mutation.AddedConcurrency(); ok {
 		_spec.AddField(user.FieldConcurrency, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.QueuePriority(); ok {
+		_spec.SetField(user.FieldQueuePriority, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedQueuePriority(); ok {
+		_spec.AddField(user.FieldQueuePriority, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(user.FieldStatus, field.TypeString, value)

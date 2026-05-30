@@ -54,6 +54,7 @@ type CreateUserRequest struct {
 	Notes         string  `json:"notes"`
 	Balance       float64 `json:"balance"`
 	Concurrency   int     `json:"concurrency"`
+	QueuePriority *int    `json:"queue_priority"`
 	RPMLimit      int     `json:"rpm_limit"`
 	AllowedGroups []int64 `json:"allowed_groups"`
 }
@@ -67,6 +68,7 @@ type UpdateUserRequest struct {
 	Notes         *string  `json:"notes"`
 	Balance       *float64 `json:"balance"`
 	Concurrency   *int     `json:"concurrency"`
+	QueuePriority *int     `json:"queue_priority"`
 	RPMLimit      *int     `json:"rpm_limit"`
 	Status        string   `json:"status" binding:"omitempty,oneof=active disabled"`
 	AllowedGroups *[]int64 `json:"allowed_groups"`
@@ -259,6 +261,7 @@ func (h *UserHandler) Create(c *gin.Context) {
 		Notes:         req.Notes,
 		Balance:       req.Balance,
 		Concurrency:   req.Concurrency,
+		QueuePriority: req.QueuePriority,
 		RPMLimit:      req.RPMLimit,
 		AllowedGroups: req.AllowedGroups,
 	})
@@ -293,6 +296,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 		Notes:         req.Notes,
 		Balance:       req.Balance,
 		Concurrency:   req.Concurrency,
+		QueuePriority: req.QueuePriority,
 		RPMLimit:      req.RPMLimit,
 		Status:        req.Status,
 		AllowedGroups: req.AllowedGroups,

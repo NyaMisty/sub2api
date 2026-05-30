@@ -211,44 +211,20 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 
 	// 0. 检查wait队列是否已满
-	maxWait := service.CalculateMaxWait(subject.Concurrency)
-	canWait, err := h.concurrencyHelper.IncrementWaitCount(c.Request.Context(), subject.UserID, maxWait)
-	waitCounted := false
-	if err != nil {
-		reqLog.Warn("gateway.user_wait_counter_increment_failed", zap.Error(err))
-		// On error, allow request to proceed
-	} else if !canWait {
-		reqLog.Info("gateway.user_wait_queue_full", zap.Int("max_wait", maxWait))
-		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Too many pending requests, please retry later")
-		return
-	}
-	if err == nil && canWait {
-		waitCounted = true
-	}
-	// Ensure we decrement if we exit before acquiring the user slot.
-	defer func() {
-		if waitCounted {
-			h.concurrencyHelper.DecrementWaitCount(c.Request.Context(), subject.UserID)
-		}
-	}()
-
 	// 1. 首先获取用户并发槽位
-	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted)
+	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, subject.UserID, subject.Concurrency, subject.QueuePriority, reqStream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gateway.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, "user", streamStarted)
 		return
 	}
-	// User slot acquired: no longer waiting in the queue.
-	if waitCounted {
-		h.concurrencyHelper.DecrementWaitCount(c.Request.Context(), subject.UserID)
-		waitCounted = false
-	}
 	// 在请求结束或 Context 取消时确保释放槽位，避免客户端断开造成泄漏
 	userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), userReleaseFunc)
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
-	}
+	defer func() {
+		if userReleaseFunc != nil {
+			userReleaseFunc()
+		}
+	}()
 
 	// 2. 【新增】Wait后二次检查余额/订阅
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
@@ -337,12 +313,26 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 							zap.String("platform", platform),
 							zap.Duration("timeout", retryState.timeout),
 						)
-						waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+						newUserReleaseFunc, waited, waitErr := retryState.WaitForUserSlotReacquire(
+							c,
+							h.concurrencyHelper,
+							subject.UserID,
+							subject.Concurrency,
+							subject.QueuePriority,
+							userReleaseFunc,
+							reqStream,
+							&streamStarted,
+						)
 						if waitErr != nil {
 							reqLog.Info("gateway.select_account_wait_interrupted", zap.Error(waitErr))
 							return
 						}
 						if waited {
+							if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+								userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+							} else {
+								userReleaseFunc = newUserReleaseFunc
+							}
 							continue
 						}
 					}
@@ -601,12 +591,26 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 							zap.String("platform", platform),
 							zap.Duration("timeout", retryState.timeout),
 						)
-						waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+						newUserReleaseFunc, waited, waitErr := retryState.WaitForUserSlotReacquire(
+							c,
+							h.concurrencyHelper,
+							subject.UserID,
+							subject.Concurrency,
+							subject.QueuePriority,
+							userReleaseFunc,
+							reqStream,
+							&streamStarted,
+						)
 						if waitErr != nil {
 							reqLog.Info("gateway.select_account_wait_interrupted", zap.Error(waitErr))
 							return
 						}
 						if waited {
+							if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+								userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+							} else {
+								userReleaseFunc = newUserReleaseFunc
+							}
 							continue
 						}
 					}

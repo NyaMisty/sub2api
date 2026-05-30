@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -228,6 +229,13 @@ func (h *ConcurrencyHelper) TryAcquireUserSlot(ctx context.Context, userID int64
 	return result.ReleaseFunc, true, nil
 }
 
+func (h *ConcurrencyHelper) SupportsAuthorityUserQueue() bool {
+	if h == nil || h.concurrencyService == nil {
+		return false
+	}
+	return h.concurrencyService.SupportsUserWaitAuthorityQueue()
+}
+
 // TryAcquireAccountSlot 尝试立即获取账号并发槽位。
 // 返回值: (releaseFunc, acquired, error)
 func (h *ConcurrencyHelper) TryAcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (func(), bool, error) {
@@ -244,7 +252,7 @@ func (h *ConcurrencyHelper) TryAcquireAccountSlot(ctx context.Context, accountID
 // AcquireUserSlotWithWait acquires a user concurrency slot, waiting if necessary.
 // For streaming requests, sends ping events during the wait.
 // streamStarted is updated if streaming response has begun.
-func (h *ConcurrencyHelper) AcquireUserSlotWithWait(c *gin.Context, userID int64, maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
+func (h *ConcurrencyHelper) AcquireUserSlotWithWait(c *gin.Context, userID int64, maxConcurrency int, queuePriority int, isStream bool, streamStarted *bool) (func(), error) {
 	ctx := c.Request.Context()
 
 	// Try to acquire immediately
@@ -257,8 +265,85 @@ func (h *ConcurrencyHelper) AcquireUserSlotWithWait(c *gin.Context, userID int64
 		return releaseFunc, nil
 	}
 
+	if h.SupportsAuthorityUserQueue() {
+		releaseFunc, acquired, err = h.waitForUserSlotTurn(
+			c,
+			userID,
+			maxConcurrency,
+			queuePriority,
+			maxConcurrencyWait,
+			0,
+			service.UserWaitReasonUserSlot,
+			isStream,
+			streamStarted,
+		)
+		if err != nil {
+			if errors.Is(err, service.ErrUserWaitQueueFull) {
+				return nil, &ConcurrencyError{SlotType: "user"}
+			}
+			return nil, err
+		}
+		if !acquired {
+			return nil, &ConcurrencyError{
+				SlotType:  "user",
+				IsTimeout: true,
+			}
+		}
+		return releaseFunc, nil
+	}
+
+	maxWait := service.CalculateMaxWait(maxConcurrency)
+	canWait, waitErr := h.IncrementWaitCount(ctx, userID, maxWait)
+	if waitErr != nil {
+		// 保持原有降级语义：等待计数异常时放行后续等待流程。
+	} else if !canWait {
+		return nil, &ConcurrencyError{SlotType: "user"}
+	}
+
+	waitCounted := waitErr == nil && canWait
+	defer func() {
+		if waitCounted {
+			h.DecrementWaitCount(ctx, userID)
+		}
+	}()
+
 	// Need to wait - handle streaming ping if needed
-	return h.waitForSlotWithPing(c, "user", userID, maxConcurrency, isStream, streamStarted)
+	releaseFunc, err = h.waitForSlotWithPing(c, "user", userID, maxConcurrency, isStream, streamStarted)
+	if err != nil {
+		return nil, err
+	}
+	if waitCounted {
+		h.DecrementWaitCount(ctx, userID)
+		waitCounted = false
+	}
+	return releaseFunc, nil
+}
+
+func (h *ConcurrencyHelper) WaitForNoAvailableUserSlotReacquire(
+	c *gin.Context,
+	userID int64,
+	maxConcurrency int,
+	queuePriority int,
+	timeout time.Duration,
+	initialDelay time.Duration,
+	currentReleaseFunc func(),
+	isStream bool,
+	streamStarted *bool,
+) (func(), bool, error) {
+	if currentReleaseFunc != nil {
+		currentReleaseFunc()
+	}
+	return h.waitForUserSlotTurn(
+		c,
+		userID,
+		maxConcurrency,
+		queuePriority,
+		timeout,
+		initialDelay,
+		service.UserWaitReasonNoAvailable,
+		isStream,
+		streamStarted,
+	)
 }
 
 // AcquireAccountSlotWithWait acquires an account concurrency slot, waiting if necessary.
@@ -335,6 +420,125 @@ func (h *ConcurrencyHelper) WaitWithPing(c *gin.Context, wait time.Duration, isS
 		case <-timer.C:
 			return nil
 		}
+	}
+}
+
+func (h *ConcurrencyHelper) waitForUserSlotTurn(
+	c *gin.Context,
+	userID int64,
+	maxConcurrency int,
+	queuePriority int,
+	timeout time.Duration,
+	initialDelay time.Duration,
+	reason service.UserWaitReason,
+	isStream bool,
+	streamStarted *bool,
+) (func(), bool, error) {
+	if h == nil || h.concurrencyService == nil {
+		return nil, false, service.ErrUserWaitQueueUnavailable
+	}
+	if timeout <= 0 {
+		return nil, false, nil
+	}
+
+	ctx := c.Request.Context()
+	ticket, err := h.concurrencyService.EnqueueUserWait(ctx, service.UserWaitRequest{
+		UserID:         userID,
+		MaxConcurrency: maxConcurrency,
+		MaxWait:        service.CalculateMaxWait(maxConcurrency),
+		Priority:       queuePriority,
+		Reason:         reason,
+		Timeout:        timeout,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	completed := false
+	finish := func(state service.UserWaitState) {
+		if completed || ticket == nil {
+			return
+		}
+		completed = true
+		h.concurrencyService.CompleteUserWaitBestEffort(ticket.RequestID, state)
+	}
+	defer func() {
+		if !completed && ctx.Err() != nil {
+			finish(service.UserWaitStateCanceled)
+		}
+	}()
+
+	backoff := initialBackoff
+	if initialDelay > 0 {
+		delay := initialDelay
+		if remaining := time.Until(ticket.Deadline); delay > remaining {
+			delay = remaining
+		}
+		if delay > 0 {
+			if err := h.WaitWithPing(c, delay, isStream, streamStarted); err != nil {
+				finish(service.UserWaitStateCanceled)
+				return nil, false, err
+			}
+			backoff = nextBackoff(delay)
+		}
+	}
+	for {
+		poll, err := h.concurrencyService.PollUserWait(ctx, ticket.RequestID)
+		if err != nil {
+			finish(service.UserWaitStateCanceled)
+			return nil, false, err
+		}
+
+		state := service.UserWaitStateMissing
+		if poll != nil {
+			state = poll.State
+		}
+		switch state {
+		case service.UserWaitStateGranted:
+			result, err := h.concurrencyService.AcquireGrantedUserSlot(ctx, userID, maxConcurrency)
+			if err != nil {
+				finish(service.UserWaitStateCanceled)
+				return nil, false, err
+			}
+			if result == nil || !result.Acquired {
+				finish(service.UserWaitStateCanceled)
+				return nil, false, fmt.Errorf("granted user wait did not acquire slot")
+			}
+			finish(service.UserWaitStateDone)
+			return result.ReleaseFunc, true, nil
+		case service.UserWaitStateTimedOut:
+			finish(service.UserWaitStateTimedOut)
+			return nil, false, nil
+		case service.UserWaitStateQueued:
+		case service.UserWaitStateCanceled, service.UserWaitStateDone, service.UserWaitStateMissing:
+			finish(state)
+			if ctx.Err() != nil {
+				return nil, false, ctx.Err()
+			}
+			return nil, false, fmt.Errorf("user wait request %s ended unexpectedly with state=%s", ticket.RequestID, state)
+		default:
+			finish(state)
+			return nil, false, fmt.Errorf("unknown user wait state: %s", state)
+		}
+
+		remaining := time.Until(ticket.Deadline)
+		if remaining <= 0 {
+			finish(service.UserWaitStateTimedOut)
+			return nil, false, nil
+		}
+
+		delay := backoff
+		if delay <= 0 {
+			delay = initialBackoff
+		}
+		if delay > remaining {
+			delay = remaining
+		}
+		if err := h.WaitWithPing(c, delay, isStream, streamStarted); err != nil {
+			finish(service.UserWaitStateCanceled)
+			return nil, false, err
+		}
+		backoff = nextBackoff(delay)
 	}
 }
 

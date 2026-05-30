@@ -15,6 +15,7 @@ type User struct {
 	Role          string     `json:"role"`
 	Balance       float64    `json:"balance"`
 	Concurrency   int        `json:"concurrency"`
+	QueuePriority int        `json:"queue_priority"`
 	Status        string     `json:"status"`
 	AllowedGroups []int64    `json:"allowed_groups"`
 	LastActiveAt  *time.Time `json:"last_active_at,omitempty"`

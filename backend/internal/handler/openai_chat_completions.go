@@ -98,13 +98,15 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
-	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
+	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, subject.QueuePriority, reqStream, &streamStarted, reqLog)
 	if !acquired {
 		return
 	}
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
-	}
+	defer func() {
+		if userReleaseFunc != nil {
+			userReleaseFunc()
+		}
+	}()
 
 	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		reqLog.Info("openai_chat_completions.billing_eligibility_check_failed", zap.Error(err))
@@ -162,12 +164,26 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						zap.String("model", reqModel),
 						zap.Duration("timeout", retryState.timeout),
 					)
-					waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+					newUserReleaseFunc, waited, waitErr := retryState.WaitForUserSlotReacquire(
+						c,
+						h.concurrencyHelper,
+						subject.UserID,
+						subject.Concurrency,
+						subject.QueuePriority,
+						userReleaseFunc,
+						reqStream,
+						&streamStarted,
+					)
 					if waitErr != nil {
 						reqLog.Info("openai_chat_completions.account_select_wait_interrupted", zap.Error(waitErr))
 						return
 					}
 					if waited {
+						if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+							userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+						} else {
+							userReleaseFunc = newUserReleaseFunc
+						}
 						continue
 					}
 				}
@@ -201,12 +217,26 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					zap.String("model", reqModel),
 					zap.Duration("timeout", retryState.timeout),
 				)
-				waited, waitErr := retryState.Wait(c, h.concurrencyHelper, reqStream, &streamStarted)
+				newUserReleaseFunc, waited, waitErr := retryState.WaitForUserSlotReacquire(
+					c,
+					h.concurrencyHelper,
+					subject.UserID,
+					subject.Concurrency,
+					subject.QueuePriority,
+					userReleaseFunc,
+					reqStream,
+					&streamStarted,
+				)
 				if waitErr != nil {
 					reqLog.Info("openai_chat_completions.account_select_wait_interrupted", zap.Error(waitErr))
 					return
 				}
 				if waited {
+					if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+						userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+					} else {
+						userReleaseFunc = newUserReleaseFunc
+					}
 					continue
 				}
 			}
