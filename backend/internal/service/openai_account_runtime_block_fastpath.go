@@ -3,7 +3,11 @@ package service
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
 )
 
 const (
@@ -34,9 +38,10 @@ func isOpenAIAccount(account *Account) bool {
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) bool {
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
+	upstreamMsg := summarizeOpenAIRuntimeBlockUpstreamError(responseBody)
 
 	if statusCode == http.StatusTooManyRequests {
-		s.markOpenAIOAuth429RateLimited(stateCtx, account, headers, responseBody)
+		s.markOpenAIOAuth429RateLimited(stateCtx, account, headers, responseBody, upstreamMsg)
 	}
 	if s == nil || account == nil || s.rateLimitService == nil {
 		return false
@@ -46,12 +51,21 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	}
 	shouldDisable := s.rateLimitService.HandleUpstreamError(stateCtx, account, statusCode, headers, responseBody)
 	if shouldDisable {
-		s.BlockAccountScheduling(account, time.Time{}, "upstream_disable")
+		logger.FromContext(stateCtx).Warn("openai.runtime_block_triggered",
+			zap.String("component", "service.openai_gateway"),
+			zap.Int64("account_id", account.ID),
+			zap.String("account_type", account.Type),
+			zap.Int("upstream_status", statusCode),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("reason", "upstream_disable"),
+			zap.Bool("persistent_state_expected", true),
+		)
+		s.BlockAccountSchedulingWithContext(stateCtx, account, time.Time{}, "upstream_disable")
 	}
 	return shouldDisable
 }
 
-func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
+func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte, upstreamMsg string) {
 	if s == nil || !isOpenAIOAuthAccount(account) {
 		return
 	}
@@ -69,24 +83,70 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 			cooldownUntil = time.Now().Add(cooldown)
 		}
 	}
-	s.BlockAccountScheduling(account, cooldownUntil, "429")
+	logger.FromContext(ctx).Warn("openai.runtime_block_triggered",
+		zap.String("component", "service.openai_gateway"),
+		zap.Int64("account_id", account.ID),
+		zap.String("account_type", account.Type),
+		zap.Int("upstream_status", http.StatusTooManyRequests),
+		zap.String("upstream_error_message", upstreamMsg),
+		zap.String("reason", "429"),
+		zap.Time("requested_until", cooldownUntil),
+		zap.Bool("persistent_state_expected", true),
+	)
+	s.BlockAccountSchedulingWithContext(ctx, account, cooldownUntil, "429")
+}
+
+func summarizeOpenAIRuntimeBlockUpstreamError(body []byte) string {
+	msg := strings.TrimSpace(ExtractUpstreamErrorMessage(body))
+	if msg == "" {
+		msg = strings.TrimSpace(string(body))
+	}
+	if msg == "" {
+		return ""
+	}
+	msg = sanitizeUpstreamErrorMessage(msg)
+	return truncateForLog([]byte(msg), 512)
+}
+
+func derefAccountTime(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
 }
 
 func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until time.Time, reason string) {
+	s.BlockAccountSchedulingWithContext(context.Background(), account, until, reason)
+}
+
+func (s *OpenAIGatewayService) BlockAccountSchedulingWithContext(ctx context.Context, account *Account, until time.Time, reason string) {
 	if s == nil || !isOpenAIAccount(account) {
 		return
 	}
 	now := time.Now()
-	blockUntil := until
+	requestedUntil := until
+	blockUntil := requestedUntil
 	if blockUntil.IsZero() || !blockUntil.After(now) {
 		blockUntil = now.Add(openAIStopSchedulingBridgeCooldown)
 	}
+	log := logger.FromContext(ctx).With(
+		zap.String("component", "service.openai_gateway"),
+		zap.Int64("account_id", account.ID),
+		zap.String("account_type", account.Type),
+		zap.String("reason", reason),
+		zap.Time("requested_until", requestedUntil),
+		zap.Time("applied_until", blockUntil),
+		zap.Bool("normalized_until", !requestedUntil.Equal(blockUntil)),
+	)
 
 	for {
 		current, loaded := s.openaiAccountRuntimeBlockUntil.Load(account.ID)
 		if !loaded {
 			actual, stored := s.openaiAccountRuntimeBlockUntil.LoadOrStore(account.ID, blockUntil)
 			if !stored {
+				log.Warn("openai.runtime_block_applied",
+					zap.String("action", "store"),
+				)
 				return
 			}
 			current = actual
@@ -95,27 +155,81 @@ func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until ti
 		currentUntil, ok := current.(time.Time)
 		if !ok || currentUntil.IsZero() {
 			if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
+				log.Warn("openai.runtime_block_applied",
+					zap.String("action", "replace_invalid"),
+					zap.Time("previous_until", time.Time{}),
+				)
 				return
 			}
 			continue
 		}
 		if currentUntil.After(blockUntil) {
+			log.Info("openai.runtime_block_skipped",
+				zap.String("action", "keep_existing"),
+				zap.Time("previous_until", currentUntil),
+			)
 			return
 		}
 		if s.openaiAccountRuntimeBlockUntil.CompareAndSwap(account.ID, current, blockUntil) {
+			action := "extend"
+			if currentUntil.Equal(blockUntil) {
+				action = "refresh"
+			}
+			log.Warn("openai.runtime_block_applied",
+				zap.String("action", action),
+				zap.Time("previous_until", currentUntil),
+			)
 			return
 		}
 	}
 }
 
 func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
+	s.ClearAccountSchedulingBlockWithContext(context.Background(), accountID)
+}
+
+func (s *OpenAIGatewayService) ClearAccountSchedulingBlockWithContext(ctx context.Context, accountID int64) {
 	if s == nil || accountID <= 0 {
 		return
 	}
+	defer s.publishUserWaitWakeAfterAccountRecovery(ctx)
+
+	log := logger.FromContext(ctx).With(
+		zap.String("component", "service.openai_gateway"),
+		zap.Int64("account_id", accountID),
+	)
+	current, ok := s.openaiAccountRuntimeBlockUntil.Load(accountID)
 	s.openaiAccountRuntimeBlockUntil.Delete(accountID)
+	if !ok {
+		log.Info("openai.runtime_block_cleared", zap.String("action", "noop_missing"))
+		return
+	}
+	if currentUntil, ok := current.(time.Time); ok && !currentUntil.IsZero() {
+		log.Info("openai.runtime_block_cleared",
+			zap.String("action", "delete"),
+			zap.Time("previous_until", currentUntil),
+		)
+		return
+	}
+	log.Warn("openai.runtime_block_cleared",
+		zap.String("action", "delete_invalid"),
+	)
+}
+
+func (s *OpenAIGatewayService) publishUserWaitWakeAfterAccountRecovery(ctx context.Context) {
+	if s == nil || s.concurrencyService == nil {
+		return
+	}
+	wakeCtx, cancel := openAIAccountStateContext(ctx)
+	defer cancel()
+	s.concurrencyService.PublishUserWaitWake(wakeCtx)
 }
 
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
+	return s.isOpenAIAccountRuntimeBlockedWithContext(context.Background(), account)
+}
+
+func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlockedWithContext(ctx context.Context, account *Account) bool {
 	if s == nil || !isOpenAIAccount(account) {
 		return false
 	}
@@ -125,13 +239,24 @@ func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) b
 	}
 	cooldownUntil, ok := value.(time.Time)
 	if !ok || cooldownUntil.IsZero() {
+		logger.FromContext(ctx).Warn("openai.runtime_block_entry_invalid",
+			zap.String("component", "service.openai_gateway"),
+			zap.Int64("account_id", account.ID),
+		)
 		s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+		s.publishUserWaitWakeAfterAccountRecovery(ctx)
 		return false
 	}
 	if time.Now().Before(cooldownUntil) {
 		return true
 	}
+	logger.FromContext(ctx).Info("openai.runtime_block_expired",
+		zap.String("component", "service.openai_gateway"),
+		zap.Int64("account_id", account.ID),
+		zap.Time("expired_until", cooldownUntil),
+	)
 	s.openaiAccountRuntimeBlockUntil.Delete(account.ID)
+	s.publishUserWaitWakeAfterAccountRecovery(ctx)
 	return false
 }
 

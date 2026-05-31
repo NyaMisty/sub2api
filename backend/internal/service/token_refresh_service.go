@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // tokenRefreshTempUnschedDuration token 刷新重试耗尽后临时不可调度的持续时间
@@ -109,14 +111,52 @@ func (s *TokenRefreshService) notifyAccountSchedulingBlocked(account *Account, u
 	if s == nil || s.runtimeBlocker == nil || account == nil {
 		return
 	}
-	s.runtimeBlocker.BlockAccountScheduling(account, until, reason)
+	logger.L().With(
+		zap.String("component", "service.token_refresh"),
+		zap.Int64("account_id", account.ID),
+		zap.String("account_platform", account.Platform),
+		zap.String("account_type", account.Type),
+		zap.String("reason", reason),
+		zap.Time("requested_until", until),
+	).Warn("account.runtime_block_requested")
+	s.runtimeBlocker.BlockAccountSchedulingWithContext(context.Background(), account, until, reason)
+}
+
+func (s *TokenRefreshService) notifyAccountSchedulingBlockedWithContext(ctx context.Context, account *Account, until time.Time, reason string) {
+	if s == nil || s.runtimeBlocker == nil || account == nil {
+		return
+	}
+	logger.FromContext(ctx).With(
+		zap.String("component", "service.token_refresh"),
+		zap.Int64("account_id", account.ID),
+		zap.String("account_platform", account.Platform),
+		zap.String("account_type", account.Type),
+		zap.String("reason", reason),
+		zap.Time("requested_until", until),
+	).Warn("account.runtime_block_requested")
+	s.runtimeBlocker.BlockAccountSchedulingWithContext(ctx, account, until, reason)
 }
 
 func (s *TokenRefreshService) notifyAccountSchedulingBlockCleared(accountID int64) {
 	if s == nil || s.runtimeBlocker == nil || accountID <= 0 {
 		return
 	}
-	s.runtimeBlocker.ClearAccountSchedulingBlock(accountID)
+	logger.L().With(
+		zap.String("component", "service.token_refresh"),
+		zap.Int64("account_id", accountID),
+	).Info("account.runtime_block_clear_requested")
+	s.runtimeBlocker.ClearAccountSchedulingBlockWithContext(context.Background(), accountID)
+}
+
+func (s *TokenRefreshService) notifyAccountSchedulingBlockClearedWithContext(ctx context.Context, accountID int64) {
+	if s == nil || s.runtimeBlocker == nil || accountID <= 0 {
+		return
+	}
+	logger.FromContext(ctx).With(
+		zap.String("component", "service.token_refresh"),
+		zap.Int64("account_id", accountID),
+	).Info("account.runtime_block_clear_requested")
+	s.runtimeBlocker.ClearAccountSchedulingBlockWithContext(ctx, accountID)
 }
 
 // Start 启动后台刷新服务
@@ -303,7 +343,7 @@ func (s *TokenRefreshService) refreshWithRetry(ctx context.Context, account *Acc
 		// 不可重试错误（invalid_grant/invalid_client 等）直接标记 error 状态并返回
 		if isNonRetryableRefreshError(err) {
 			errorMsg := fmt.Sprintf("Token refresh failed (non-retryable): %v", err)
-			s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
+			s.notifyAccountSchedulingBlockedWithContext(ctx, account, time.Time{}, "token_refresh_non_retryable")
 			if setErr := s.accountRepo.SetError(ctx, account.ID, errorMsg); setErr != nil {
 				slog.Error("token_refresh.set_error_status_failed",
 					"account_id", account.ID,
@@ -347,7 +387,7 @@ func (s *TokenRefreshService) refreshWithRetry(ctx context.Context, account *Acc
 	// 设置临时不可调度 10 分钟（不标记 error，保持 status=active 让下个刷新周期能继续尝试）
 	until := time.Now().Add(tokenRefreshTempUnschedDuration)
 	reason := fmt.Sprintf("token refresh retry exhausted: %v", lastErr)
-	s.notifyAccountSchedulingBlocked(account, until, "token_refresh_retry_exhausted")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, until, "token_refresh_retry_exhausted")
 	if setErr := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); setErr != nil {
 		slog.Warn("token_refresh.set_temp_unschedulable_failed",
 			"account_id", account.ID,
@@ -376,7 +416,7 @@ func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *A
 			)
 		} else {
 			slog.Info("token_refresh.cleared_missing_project_id_error", "account_id", account.ID)
-			s.notifyAccountSchedulingBlockCleared(account.ID)
+			s.notifyAccountSchedulingBlockClearedWithContext(ctx, account.ID)
 		}
 	}
 	// 刷新成功后清除临时不可调度状态（处理 OAuth 401 恢复场景）
@@ -388,7 +428,7 @@ func (s *TokenRefreshService) postRefreshActions(ctx context.Context, account *A
 			)
 		} else {
 			slog.Info("token_refresh.cleared_temp_unschedulable", "account_id", account.ID)
-			s.notifyAccountSchedulingBlockCleared(account.ID)
+			s.notifyAccountSchedulingBlockClearedWithContext(ctx, account.ID)
 		}
 		// 同步清除 Redis 缓存，避免调度器读到过期的临时不可调度状态
 		if s.tempUnschedCache != nil {

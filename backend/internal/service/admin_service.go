@@ -2904,7 +2904,7 @@ func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Ac
 		return nil, err
 	}
 	if s.runtimeBlocker != nil {
-		s.runtimeBlocker.ClearAccountSchedulingBlock(id)
+		s.runtimeBlocker.ClearAccountSchedulingBlockWithContext(ctx, id)
 	}
 	return s.accountRepo.GetByID(ctx, id)
 }

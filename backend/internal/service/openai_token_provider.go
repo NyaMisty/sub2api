@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
 )
 
 const (
@@ -162,7 +165,7 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 			const reason = "openai access_token expired and refresh_token is missing"
 			// 永久故障：缺失 refresh_token 时账号无法自愈，必须立即从调度池剔除，
 			// 否则会被反复选中、每次都在 token 阶段直接返回错误，对用户呈现持续 502。
-			p.disableAccountMissingRefreshToken(account, reason)
+			p.disableAccountMissingRefreshToken(ctx, account, reason)
 			return "", errors.New(reason)
 		}
 		needsRefresh = false
@@ -275,13 +278,23 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 // 这是一种永久性故障：仅靠后续请求或 TokenRefreshService 不会自愈
 // （NeedsRefresh 也会因 refresh_token 为空直接跳过），
 // 必须主动剔除以避免账号被持续选中导致用户端反复 502。
-// 使用 background context 是因为请求 context 可能很快结束。
-func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(account *Account, reason string) {
+// runtime block 使用请求 context 保留链路日志；持久化禁用仍使用 background context，
+// 避免请求取消中断账号状态落库。
+func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(ctx context.Context, account *Account, reason string) {
 	if p == nil || p.accountRepo == nil || account == nil {
 		return
 	}
 	if p.runtimeBlocker != nil {
-		p.runtimeBlocker.BlockAccountScheduling(account, time.Time{}, "missing_refresh_token")
+		logger.FromContext(ctx).With(
+			zap.String("component", "service.openai_token_provider"),
+			zap.Int64("account_id", account.ID),
+			zap.String("account_platform", account.Platform),
+			zap.String("account_type", account.Type),
+			zap.String("reason", "missing_refresh_token"),
+			zap.String("trigger", reason),
+			zap.Time("expires_at", derefAccountTime(account.GetCredentialAsTime("expires_at"))),
+		).Warn("openai.runtime_block_triggered")
+		p.runtimeBlocker.BlockAccountSchedulingWithContext(ctx, account, time.Time{}, "missing_refresh_token")
 	}
 	bgCtx := context.Background()
 	if err := p.accountRepo.SetError(bgCtx, account.ID, reason); err != nil {

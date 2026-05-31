@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 )
 
 // RateLimitService 处理限流和过载状态管理
@@ -34,8 +35,8 @@ type RateLimitService struct {
 }
 
 type AccountRuntimeBlocker interface {
-	BlockAccountScheduling(account *Account, until time.Time, reason string)
-	ClearAccountSchedulingBlock(accountID int64)
+	BlockAccountSchedulingWithContext(ctx context.Context, account *Account, until time.Time, reason string)
+	ClearAccountSchedulingBlockWithContext(ctx context.Context, accountID int64)
 }
 
 // SuccessfulTestRecoveryResult 表示测试成功后恢复了哪些运行时状态。
@@ -108,18 +109,60 @@ func (s *RateLimitService) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocke
 	s.runtimeBlocker = blocker
 }
 
-func (s *RateLimitService) notifyAccountSchedulingBlocked(account *Account, until time.Time, reason string) {
+func (s *RateLimitService) notifyAccountSchedulingBlocked(account *Account, until time.Time, reason string, extraFields ...zap.Field) {
 	if s == nil || s.runtimeBlocker == nil || account == nil {
 		return
 	}
-	s.runtimeBlocker.BlockAccountScheduling(account, until, reason)
+	fields := []zap.Field{
+		zap.String("component", "service.ratelimit"),
+		zap.Int64("account_id", account.ID),
+		zap.String("account_platform", account.Platform),
+		zap.String("account_type", account.Type),
+		zap.String("reason", reason),
+		zap.Time("requested_until", until),
+	}
+	fields = append(fields, extraFields...)
+	logger.L().With(fields...).Warn("account.runtime_block_requested")
+	s.runtimeBlocker.BlockAccountSchedulingWithContext(context.Background(), account, until, reason)
+}
+
+func (s *RateLimitService) notifyAccountSchedulingBlockedWithContext(ctx context.Context, account *Account, until time.Time, reason string, extraFields ...zap.Field) {
+	if s == nil || s.runtimeBlocker == nil || account == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.String("component", "service.ratelimit"),
+		zap.Int64("account_id", account.ID),
+		zap.String("account_platform", account.Platform),
+		zap.String("account_type", account.Type),
+		zap.String("reason", reason),
+		zap.Time("requested_until", until),
+	}
+	fields = append(fields, extraFields...)
+	logger.FromContext(ctx).With(fields...).Warn("account.runtime_block_requested")
+	s.runtimeBlocker.BlockAccountSchedulingWithContext(ctx, account, until, reason)
 }
 
 func (s *RateLimitService) notifyAccountSchedulingBlockCleared(accountID int64) {
 	if s == nil || s.runtimeBlocker == nil || accountID <= 0 {
 		return
 	}
-	s.runtimeBlocker.ClearAccountSchedulingBlock(accountID)
+	logger.L().With(
+		zap.String("component", "service.ratelimit"),
+		zap.Int64("account_id", accountID),
+	).Info("account.runtime_block_clear_requested")
+	s.runtimeBlocker.ClearAccountSchedulingBlockWithContext(context.Background(), accountID)
+}
+
+func (s *RateLimitService) notifyAccountSchedulingBlockClearedWithContext(ctx context.Context, accountID int64) {
+	if s == nil || s.runtimeBlocker == nil || accountID <= 0 {
+		return
+	}
+	logger.FromContext(ctx).With(
+		zap.String("component", "service.ratelimit"),
+		zap.Int64("account_id", accountID),
+	).Info("account.runtime_block_clear_requested")
+	s.runtimeBlocker.ClearAccountSchedulingBlockWithContext(ctx, accountID)
 }
 
 // ErrorPolicyResult 表示错误策略检查的结果
@@ -192,17 +235,29 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		// "organization has been disabled" → 永久禁用
 		if strings.Contains(strings.ToLower(upstreamMsg), "organization has been disabled") {
 			msg := "Organization disabled (400): " + upstreamMsg
-			s.handleAuthError(ctx, account, msg)
+			s.handleAuthError(ctx, account, msg,
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("auth_error_kind", "organization_disabled"),
+			)
 			shouldDisable = true
 		} else if account.Platform == PlatformAnthropic && strings.Contains(strings.ToLower(upstreamMsg), "credit balance") {
 			// Anthropic API key 余额不足（语义等同 402），停止调度
 			msg := "Credit balance exhausted (400): " + upstreamMsg
-			s.handleAuthError(ctx, account, msg)
+			s.handleAuthError(ctx, account, msg,
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("auth_error_kind", "credit_balance_exhausted"),
+			)
 			shouldDisable = true
 		} else if strings.Contains(strings.ToLower(upstreamMsg), "identity verification is required") {
 			// KYC 身份验证要求 → 永久禁用，账号需完成身份验证后才能恢复
 			msg := "Identity verification required (400): " + upstreamMsg
-			s.handleAuthError(ctx, account, msg)
+			s.handleAuthError(ctx, account, msg,
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("auth_error_kind", "identity_verification_required"),
+			)
 			shouldDisable = true
 		}
 		// 其他 400 错误（如参数问题）不处理，不禁用账号
@@ -214,7 +269,12 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			if upstreamMsg != "" {
 				msg = "Token revoked (401): " + upstreamMsg
 			}
-			s.handleAuthError(ctx, account, msg)
+			s.handleAuthError(ctx, account, msg,
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("upstream_error_code", openai401Code),
+				zap.String("auth_error_kind", "openai_token_revoked"),
+			)
 			shouldDisable = true
 			break
 		}
@@ -224,7 +284,11 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			if upstreamMsg != "" {
 				msg = "Unauthorized (401): " + upstreamMsg
 			}
-			s.handleAuthError(ctx, account, msg)
+			s.handleAuthError(ctx, account, msg,
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("auth_error_kind", "openai_unauthorized_detail"),
+			)
 			shouldDisable = true
 			break
 		}
@@ -244,7 +308,11 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				if upstreamMsg != "" {
 					msg = "OAuth 401 (no refresh_token): " + upstreamMsg
 				}
-				s.handleAuthError(ctx, account, msg)
+				s.handleAuthError(ctx, account, msg,
+					zap.Int("upstream_status", statusCode),
+					zap.String("upstream_error_message", upstreamMsg),
+					zap.String("auth_error_kind", "oauth_missing_refresh_token"),
+				)
 				shouldDisable = true
 				break
 			}
@@ -266,7 +334,12 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				cooldownMinutes = 10
 			}
 			until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
-			s.notifyAccountSchedulingBlocked(account, until, "oauth_401")
+			s.notifyAccountSchedulingBlockedWithContext(ctx, account, until, "oauth_401",
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("persistent_state", "temp_unschedulable"),
+				zap.Strings("persistent_fields", []string{"temp_unschedulable_until", "temp_unschedulable_reason"}),
+			)
 			if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, msg); err != nil {
 				slog.Warn("oauth_401_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
 			}
@@ -277,14 +350,23 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			if upstreamMsg != "" {
 				msg = "Authentication failed (401): " + upstreamMsg
 			}
-			s.handleAuthError(ctx, account, msg)
+			s.handleAuthError(ctx, account, msg,
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("auth_error_kind", "authentication_failed"),
+			)
 			shouldDisable = true
 		}
 	case 402:
 		// OpenAI: deactivated_workspace 表示工作区已停用，直接标记 error
 		if account.Platform == PlatformOpenAI && gjson.GetBytes(responseBody, "detail.code").String() == "deactivated_workspace" {
 			msg := "Workspace deactivated (402): workspace has been deactivated"
-			s.handleAuthError(ctx, account, msg)
+			s.handleAuthError(ctx, account, msg,
+				zap.Int("upstream_status", statusCode),
+				zap.String("upstream_error_message", upstreamMsg),
+				zap.String("upstream_error_code", "deactivated_workspace"),
+				zap.String("auth_error_kind", "workspace_deactivated"),
+			)
 			shouldDisable = true
 			break
 		}
@@ -293,7 +375,11 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		if upstreamMsg != "" {
 			msg = "Payment required (402): " + upstreamMsg
 		}
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", statusCode),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "payment_required"),
+		)
 		shouldDisable = true
 	case 403:
 		logger.LegacyPrintf(
@@ -704,8 +790,14 @@ func (s *RateLimitService) GeminiCooldown(ctx context.Context, account *Account)
 }
 
 // handleAuthError 处理认证类错误(401/403)，停止账号调度
-func (s *RateLimitService) handleAuthError(ctx context.Context, account *Account, errorMsg string) {
-	s.notifyAccountSchedulingBlocked(account, time.Time{}, "auth_error")
+func (s *RateLimitService) handleAuthError(ctx context.Context, account *Account, errorMsg string, extraFields ...zap.Field) {
+	fields := []zap.Field{
+		zap.String("error_message", errorMsg),
+		zap.String("persistent_state", "error"),
+		zap.Strings("persistent_fields", []string{"status", "error_message", "schedulable"}),
+	}
+	fields = append(fields, extraFields...)
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, time.Time{}, "auth_error", fields...)
 	if err := s.accountRepo.SetError(ctx, account.ID, errorMsg); err != nil {
 		slog.Warn("account_set_error_failed", "account_id", account.ID, "error", err)
 		return
@@ -754,7 +846,11 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 		responseBody,
 		"account may be suspended or lack permissions",
 	)
-	s.handleAuthError(ctx, account, msg)
+	s.handleAuthError(ctx, account, msg,
+		zap.Int("upstream_status", http.StatusForbidden),
+		zap.String("upstream_error_message", upstreamMsg),
+		zap.String("auth_error_kind", "forbidden"),
+	)
 	return true
 }
 
@@ -767,29 +863,56 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 	)
 
 	if s.openAI403CounterCache == nil {
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", http.StatusForbidden),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "openai_403_counter_unavailable"),
+		)
 		return true
 	}
 
 	count, err := s.openAI403CounterCache.IncrementOpenAI403Count(ctx, account.ID, openAI403CounterWindowMinutes)
 	if err != nil {
 		slog.Warn("openai_403_increment_failed", "account_id", account.ID, "error", err)
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", http.StatusForbidden),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "openai_403_counter_failed"),
+			zap.Error(err),
+		)
 		return true
 	}
 
 	if count >= openAI403DisableThreshold {
 		msg = fmt.Sprintf("%s | consecutive_403=%d/%d", msg, count, openAI403DisableThreshold)
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", http.StatusForbidden),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "openai_403_threshold_reached"),
+			zap.Int64("consecutive_403_count", count),
+			zap.Int("consecutive_403_threshold", openAI403DisableThreshold),
+		)
 		return true
 	}
 
 	until := time.Now().Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
 	reason := fmt.Sprintf("OpenAI 403 temporary cooldown (%d/%d): %s", count, openAI403DisableThreshold, msg)
-	s.notifyAccountSchedulingBlocked(account, until, "openai_403_temp")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, until, "openai_403_temp",
+		zap.Int("upstream_status", http.StatusForbidden),
+		zap.String("upstream_error_message", msg),
+		zap.Int64("consecutive_403_count", count),
+		zap.Int("consecutive_403_threshold", openAI403DisableThreshold),
+		zap.String("persistent_state", "temp_unschedulable"),
+		zap.Strings("persistent_fields", []string{"temp_unschedulable_until", "temp_unschedulable_reason"}),
+	)
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
 		slog.Warn("openai_403_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", http.StatusForbidden),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "openai_403_temp_unschedulable_failed"),
+			zap.Error(err),
+		)
 		return true
 	}
 
@@ -822,7 +945,11 @@ func (s *RateLimitService) handleAntigravity403(ctx context.Context, account *Ac
 		if validationURL := extractValidationURL(string(responseBody)); validationURL != "" {
 			msg += " | validation_url: " + validationURL
 		}
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", http.StatusForbidden),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "antigravity_validation_required"),
+		)
 		return true
 
 	case forbiddenTypeViolation:
@@ -833,7 +960,11 @@ func (s *RateLimitService) handleAntigravity403(ctx context.Context, account *Ac
 			responseBody,
 			"terms of service violation",
 		)
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", http.StatusForbidden),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "antigravity_account_violation"),
+		)
 		return true
 
 	default:
@@ -844,7 +975,11 @@ func (s *RateLimitService) handleAntigravity403(ctx context.Context, account *Ac
 			responseBody,
 			"account may be suspended or lack permissions",
 		)
-		s.handleAuthError(ctx, account, msg)
+		s.handleAuthError(ctx, account, msg,
+			zap.Int("upstream_status", http.StatusForbidden),
+			zap.String("upstream_error_message", upstreamMsg),
+			zap.String("auth_error_kind", "antigravity_forbidden"),
+		)
 		return true
 	}
 }
@@ -852,7 +987,12 @@ func (s *RateLimitService) handleAntigravity403(ctx context.Context, account *Ac
 // handleCustomErrorCode 处理自定义错误码，停止账号调度
 func (s *RateLimitService) handleCustomErrorCode(ctx context.Context, account *Account, statusCode int, errorMsg string) {
 	msg := "Custom error code " + strconv.Itoa(statusCode) + ": " + errorMsg
-	s.notifyAccountSchedulingBlocked(account, time.Time{}, "custom_error_code")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, time.Time{}, "custom_error_code",
+		zap.Int("upstream_status", statusCode),
+		zap.String("upstream_error_message", errorMsg),
+		zap.String("persistent_state", "error"),
+		zap.Strings("persistent_fields", []string{"status", "error_message", "schedulable"}),
+	)
 	if err := s.accountRepo.SetError(ctx, account.ID, msg); err != nil {
 		slog.Warn("account_set_error_failed", "account_id", account.ID, "status_code", statusCode, "error", err)
 		return
@@ -868,7 +1008,12 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
 		s.persistOpenAICodexSnapshot(ctx, account, headers)
 		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
-			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
+			s.notifyAccountSchedulingBlockedWithContext(ctx, account, *resetAt, "429",
+				zap.Int("upstream_status", http.StatusTooManyRequests),
+				zap.String("rate_limit_source", "codex_headers"),
+				zap.String("persistent_state", "rate_limited"),
+				zap.Strings("persistent_fields", []string{"rate_limited_at", "rate_limit_reset_at"}),
+			)
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
 				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 				return
@@ -880,7 +1025,12 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 
 	// 2. Anthropic 平台：尝试解析 per-window 头（5h / 7d），选择实际触发的窗口
 	if result := calculateAnthropic429ResetTime(headers); result != nil {
-		s.notifyAccountSchedulingBlocked(account, result.resetAt, "429")
+		s.notifyAccountSchedulingBlockedWithContext(ctx, account, result.resetAt, "429",
+			zap.Int("upstream_status", http.StatusTooManyRequests),
+			zap.String("rate_limit_source", "anthropic_window_headers"),
+			zap.String("persistent_state", "rate_limited"),
+			zap.Strings("persistent_fields", []string{"rate_limited_at", "rate_limit_reset_at"}),
+		)
 		if err := s.accountRepo.SetRateLimited(ctx, account.ID, result.resetAt); err != nil {
 			slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 			return
@@ -910,7 +1060,12 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			// 尝试解析 OpenAI 的 usage_limit_reached 错误
 			if resetAt := parseOpenAIRateLimitResetTime(responseBody); resetAt != nil {
 				resetTime := time.Unix(*resetAt, 0)
-				s.notifyAccountSchedulingBlocked(account, resetTime, "429")
+				s.notifyAccountSchedulingBlockedWithContext(ctx, account, resetTime, "429",
+					zap.Int("upstream_status", http.StatusTooManyRequests),
+					zap.String("rate_limit_source", "response_body"),
+					zap.String("persistent_state", "rate_limited"),
+					zap.Strings("persistent_fields", []string{"rate_limited_at", "rate_limit_reset_at"}),
+				)
 				if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime); err != nil {
 					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 					return
@@ -922,7 +1077,12 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			// 尝试解析 Gemini 格式（用于其他平台）
 			if resetAt := ParseGeminiRateLimitResetTime(responseBody); resetAt != nil {
 				resetTime := time.Unix(*resetAt, 0)
-				s.notifyAccountSchedulingBlocked(account, resetTime, "429")
+				s.notifyAccountSchedulingBlockedWithContext(ctx, account, resetTime, "429",
+					zap.Int("upstream_status", http.StatusTooManyRequests),
+					zap.String("rate_limit_source", "response_body"),
+					zap.String("persistent_state", "rate_limited"),
+					zap.Strings("persistent_fields", []string{"rate_limited_at", "rate_limit_reset_at"}),
+				)
 				if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime); err != nil {
 					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 					return
@@ -958,7 +1118,12 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	resetAt := time.Unix(ts, 0)
 
 	// 标记限流状态
-	s.notifyAccountSchedulingBlocked(account, resetAt, "429")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, resetAt, "429",
+		zap.Int("upstream_status", http.StatusTooManyRequests),
+		zap.String("rate_limit_source", "aggregated_reset_header"),
+		zap.String("persistent_state", "rate_limited"),
+		zap.Strings("persistent_fields", []string{"rate_limited_at", "rate_limit_reset_at"}),
+	)
 	if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
 		slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 		return
@@ -983,7 +1148,11 @@ func (s *RateLimitService) apply429FallbackRateLimit(ctx context.Context, accoun
 
 	resetAt := time.Now().Add(cooldown)
 	slog.Warn("rate_limit_429_fallback_used", "account_id", account.ID, "platform", account.Platform, "reason", reason, "using_default", cooldown.String())
-	s.notifyAccountSchedulingBlocked(account, resetAt, "429_fallback")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, resetAt, "429_fallback",
+		zap.String("rate_limit_source", reason),
+		zap.String("persistent_state", "rate_limited"),
+		zap.Strings("persistent_fields", []string{"rate_limited_at", "rate_limit_reset_at"}),
+	)
 	if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
 		slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 	}
@@ -1327,7 +1496,11 @@ func (s *RateLimitService) handle529(ctx context.Context, account *Account) {
 	}
 
 	until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
-	s.notifyAccountSchedulingBlocked(account, until, "529")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, until, "529",
+		zap.Int("upstream_status", 529),
+		zap.String("persistent_state", "overloaded"),
+		zap.Strings("persistent_fields", []string{"overload_until"}),
+	)
 	if err := s.accountRepo.SetOverloaded(ctx, account.ID, until); err != nil {
 		slog.Warn("overload_set_failed", "account_id", account.ID, "error", err)
 		return
@@ -1457,7 +1630,7 @@ func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) 
 		}
 	}
 	s.ResetOpenAI403Counter(ctx, accountID)
-	s.notifyAccountSchedulingBlockCleared(accountID)
+	s.notifyAccountSchedulingBlockClearedWithContext(ctx, accountID)
 	return nil
 }
 
@@ -1499,7 +1672,7 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 	if result.ClearedError || result.ClearedRateLimit {
 		s.ResetOpenAI403Counter(ctx, accountID)
 		if result.ClearedError && !result.ClearedRateLimit {
-			s.notifyAccountSchedulingBlockCleared(accountID)
+			s.notifyAccountSchedulingBlockClearedWithContext(ctx, accountID)
 		}
 	}
 
@@ -1525,7 +1698,7 @@ func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID
 	if err := s.accountRepo.ClearModelRateLimits(ctx, accountID); err != nil {
 		slog.Warn("clear_model_rate_limits_on_temp_unsched_reset_failed", "account_id", accountID, "error", err)
 	}
-	s.notifyAccountSchedulingBlockCleared(accountID)
+	s.notifyAccountSchedulingBlockClearedWithContext(ctx, accountID)
 	return nil
 }
 
@@ -1778,7 +1951,14 @@ func (s *RateLimitService) triggerTempUnschedulable(ctx context.Context, account
 		reason = strings.TrimSpace(state.ErrorMessage)
 	}
 
-	s.notifyAccountSchedulingBlocked(account, until, "temp_unschedulable")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, until, "temp_unschedulable",
+		zap.Int("upstream_status", statusCode),
+		zap.String("upstream_error_message", reason),
+		zap.Int("rule_index", ruleIndex),
+		zap.String("matched_keyword", matchedKeyword),
+		zap.String("persistent_state", "temp_unschedulable"),
+		zap.Strings("persistent_fields", []string{"temp_unschedulable_until", "temp_unschedulable_reason"}),
+	)
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
 		slog.Warn("temp_unsched_set_failed", "account_id", account.ID, "error", err)
 		return false
@@ -1883,7 +2063,11 @@ func (s *RateLimitService) triggerStreamTimeoutTempUnsched(ctx context.Context, 
 		reason = state.ErrorMessage
 	}
 
-	s.notifyAccountSchedulingBlocked(account, until, "stream_timeout_temp_unschedulable")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, until, "stream_timeout_temp_unschedulable",
+		zap.String("stream_model", model),
+		zap.String("persistent_state", "temp_unschedulable"),
+		zap.Strings("persistent_fields", []string{"temp_unschedulable_until", "temp_unschedulable_reason"}),
+	)
 	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
 		slog.Warn("stream_timeout_set_temp_unsched_failed", "account_id", account.ID, "error", err)
 		return false
@@ -1910,7 +2094,11 @@ func (s *RateLimitService) triggerStreamTimeoutTempUnsched(ctx context.Context, 
 func (s *RateLimitService) triggerStreamTimeoutError(ctx context.Context, account *Account, model string) bool {
 	errorMsg := "Stream data interval timeout (repeated failures) for model: " + model
 
-	s.notifyAccountSchedulingBlocked(account, time.Time{}, "stream_timeout_error")
+	s.notifyAccountSchedulingBlockedWithContext(ctx, account, time.Time{}, "stream_timeout_error",
+		zap.String("stream_model", model),
+		zap.String("persistent_state", "error"),
+		zap.Strings("persistent_fields", []string{"status", "error_message", "schedulable"}),
+	)
 	if err := s.accountRepo.SetError(ctx, account.ID, errorMsg); err != nil {
 		slog.Warn("stream_timeout_set_error_failed", "account_id", account.ID, "error", err)
 		return false

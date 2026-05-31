@@ -4076,7 +4076,7 @@ func (s *OpenAIGatewayService) selectAccountByPreviousResponseIDForCapability(
 		if !latest.SupportsOpenAIEndpointCapability(requiredCapability) {
 			return nil, nil
 		}
-		if s.isOpenAIAccountRuntimeBlocked(latest) {
+		if s.isOpenAIAccountRuntimeBlockedWithContext(ctx, latest) {
 			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return nil, nil
 		}

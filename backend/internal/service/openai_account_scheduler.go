@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -853,12 +855,21 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		if !account.IsSchedulable() || !account.IsOpenAI() {
 			continue
 		}
-		if s.service.isOpenAIAccountRuntimeBlocked(account) {
+		if s.service.isOpenAIAccountRuntimeBlockedWithContext(ctx, account) {
 			continue
 		}
 		// require_privacy_set: 跳过 privacy 未设置的账号并标记异常
 		if schedGroup != nil && schedGroup.RequirePrivacySet && !account.IsPrivacySet() {
-			s.service.BlockAccountScheduling(account, time.Time{}, "privacy_not_set")
+			logger.FromContext(ctx).With(
+				zap.String("component", "service.openai_scheduler"),
+				zap.Int64("account_id", account.ID),
+				zap.String("account_platform", account.Platform),
+				zap.String("account_type", account.Type),
+				zap.String("reason", "privacy_not_set"),
+				zap.Int64("group_id", schedGroup.ID),
+				zap.String("group_name", schedGroup.Name),
+			).Warn("openai.runtime_block_triggered")
+			s.service.BlockAccountSchedulingWithContext(ctx, account, time.Time{}, "privacy_not_set")
 			_ = s.service.accountRepo.SetError(ctx, account.ID,
 				fmt.Sprintf("Privacy not set, required by group [%s]", schedGroup.Name))
 			continue
@@ -972,7 +983,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 	if account == nil {
 		return false
 	}
-	if s != nil && s.service != nil && s.service.isOpenAIAccountRuntimeBlocked(account) {
+	if s != nil && s.service != nil && s.service.isOpenAIAccountRuntimeBlockedWithContext(ctx, account) {
 		return false
 	}
 	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
