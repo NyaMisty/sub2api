@@ -60,6 +60,18 @@ func NewFailoverState(maxSwitches int, hasBoundSession bool) *FailoverState {
 	}
 }
 
+// ResetAfterWaitRetry clears per-attempt failover state so the request can
+// re-enter account selection after waiting in the user queue.
+func (s *FailoverState) ResetAfterWaitRetry() {
+	if s == nil {
+		return
+	}
+	s.SwitchCount = 0
+	s.FailedAccountIDs = make(map[int64]struct{})
+	s.SameAccountRetryCount = make(map[int64]int)
+	s.LastFailoverErr = nil
+}
+
 // HandleFailoverError 处理 UpstreamFailoverError，返回下一步动作。
 // 包含：缓存计费判断、同账号重试、临时封禁、切换计数、Antigravity 延时。
 func (s *FailoverState) HandleFailoverError(

@@ -334,6 +334,33 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
 				return
 			}
+			newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+				c,
+				h.concurrencyHelper,
+				subject.UserID,
+				subject.Concurrency,
+				subject.QueuePriority,
+				userReleaseFunc,
+				reqStream,
+				&streamStarted,
+				lastFailoverErr,
+			)
+			if waitErr != nil {
+				reqLog.Info("openai.account_select_wait_interrupted", zap.Error(waitErr))
+				return
+			}
+			if waited {
+				if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+					userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+				} else {
+					userReleaseFunc = newUserReleaseFunc
+				}
+				switchCount = 0
+				failedAccountIDs = make(map[int64]struct{})
+				sameAccountRetryCount = make(map[int64]int)
+				lastFailoverErr = nil
+				continue
+			}
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else {
@@ -473,6 +500,33 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					if switchCount >= maxAccountSwitches {
+						newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+							c,
+							h.concurrencyHelper,
+							subject.UserID,
+							subject.Concurrency,
+							subject.QueuePriority,
+							userReleaseFunc,
+							reqStream,
+							&streamStarted,
+							failoverErr,
+						)
+						if waitErr != nil {
+							reqLog.Info("openai.account_select_wait_interrupted", zap.Error(waitErr))
+							return
+						}
+						if waited {
+							if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+								userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+							} else {
+								userReleaseFunc = newUserReleaseFunc
+							}
+							switchCount = 0
+							failedAccountIDs = make(map[int64]struct{})
+							sameAccountRetryCount = make(map[int64]int)
+							lastFailoverErr = nil
+							continue
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -823,6 +877,33 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				h.anthropicStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
 				return
 			} else {
+				newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+					c,
+					h.concurrencyHelper,
+					subject.UserID,
+					subject.Concurrency,
+					subject.QueuePriority,
+					userReleaseFunc,
+					reqStream,
+					&streamStarted,
+					lastFailoverErr,
+				)
+				if waitErr != nil {
+					reqLog.Info("openai_messages.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+						userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+					} else {
+						userReleaseFunc = newUserReleaseFunc
+					}
+					switchCount = 0
+					failedAccountIDs = make(map[int64]struct{})
+					sameAccountRetryCount = make(map[int64]int)
+					lastFailoverErr = nil
+					continue
+				}
 				if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
@@ -949,6 +1030,33 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					if switchCount >= maxAccountSwitches {
+						newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+							c,
+							h.concurrencyHelper,
+							subject.UserID,
+							subject.Concurrency,
+							subject.QueuePriority,
+							userReleaseFunc,
+							reqStream,
+							&streamStarted,
+							failoverErr,
+						)
+						if waitErr != nil {
+							reqLog.Info("openai_messages.account_select_wait_interrupted", zap.Error(waitErr))
+							return
+						}
+						if waited {
+							if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+								userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+							} else {
+								userReleaseFunc = newUserReleaseFunc
+							}
+							switchCount = 0
+							failedAccountIDs = make(map[int64]struct{})
+							sameAccountRetryCount = make(map[int64]int)
+							lastFailoverErr = nil
+							continue
+						}
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -1475,6 +1583,32 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					}
 				}
 			}
+			newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+				c,
+				h.concurrencyHelper,
+				subject.UserID,
+				subject.Concurrency,
+				subject.QueuePriority,
+				currentUserRelease,
+				false,
+				&streamStarted,
+				lastFailoverErr,
+			)
+			if waitErr != nil {
+				reqLog.Info("openai.websocket_account_select_wait_interrupted", zap.Error(waitErr))
+				return
+			}
+			if waited {
+				if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+					currentUserRelease = wrapReleaseOnDone(ctx, newUserReleaseFunc)
+				} else {
+					currentUserRelease = newUserReleaseFunc
+				}
+				switchCount = 0
+				failedAccountIDs = make(map[int64]struct{})
+				lastFailoverErr = nil
+				continue
+			}
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(wsConn, lastFailoverErr)
 			} else {
@@ -1690,6 +1824,32 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
 				if switchCount >= maxAccountSwitches {
+					newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+						c,
+						h.concurrencyHelper,
+						subject.UserID,
+						subject.Concurrency,
+						subject.QueuePriority,
+						currentUserRelease,
+						false,
+						&streamStarted,
+						failoverErr,
+					)
+					if waitErr != nil {
+						reqLog.Info("openai.websocket_account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+							currentUserRelease = wrapReleaseOnDone(ctx, newUserReleaseFunc)
+						} else {
+							currentUserRelease = newUserReleaseFunc
+						}
+						switchCount = 0
+						failedAccountIDs = make(map[int64]struct{})
+						lastFailoverErr = nil
+						continue
+					}
 					closeOpenAIWSFailoverExhausted(wsConn, failoverErr)
 					return
 				}

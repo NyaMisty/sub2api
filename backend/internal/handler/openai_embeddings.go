@@ -171,6 +171,32 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable")
 				return
 			}
+			newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+				c,
+				h.concurrencyHelper,
+				subject.UserID,
+				subject.Concurrency,
+				subject.QueuePriority,
+				userReleaseFunc,
+				false,
+				&streamStarted,
+				lastFailoverErr,
+			)
+			if waitErr != nil {
+				reqLog.Info("openai_embeddings.account_select_wait_interrupted", zap.Error(waitErr))
+				return
+			}
+			if waited {
+				if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+					userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+				} else {
+					userReleaseFunc = newUserReleaseFunc
+				}
+				switchCount = 0
+				failedAccountIDs = make(map[int64]struct{})
+				lastFailoverErr = nil
+				continue
+			}
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
 			} else {
@@ -268,6 +294,32 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
 				if switchCount >= maxAccountSwitches {
+					newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+						c,
+						h.concurrencyHelper,
+						subject.UserID,
+						subject.Concurrency,
+						subject.QueuePriority,
+						userReleaseFunc,
+						false,
+						&streamStarted,
+						failoverErr,
+					)
+					if waitErr != nil {
+						reqLog.Info("openai_embeddings.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+							userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+						} else {
+							userReleaseFunc = newUserReleaseFunc
+						}
+						switchCount = 0
+						failedAccountIDs = make(map[int64]struct{})
+						lastFailoverErr = nil
+						continue
+					}
 					h.handleFailoverExhausted(c, failoverErr, false)
 					return
 				}

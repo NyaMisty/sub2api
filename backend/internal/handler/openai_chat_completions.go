@@ -191,6 +191,33 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable", streamStarted)
 				return
 			} else {
+				newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+					c,
+					h.concurrencyHelper,
+					subject.UserID,
+					subject.Concurrency,
+					subject.QueuePriority,
+					userReleaseFunc,
+					reqStream,
+					&streamStarted,
+					lastFailoverErr,
+				)
+				if waitErr != nil {
+					reqLog.Info("openai_chat_completions.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+						userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+					} else {
+						userReleaseFunc = newUserReleaseFunc
+					}
+					switchCount = 0
+					failedAccountIDs = make(map[int64]struct{})
+					sameAccountRetryCount = make(map[int64]int)
+					lastFailoverErr = nil
+					continue
+				}
 				if lastFailoverErr != nil {
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
@@ -320,6 +347,33 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					if switchCount >= maxAccountSwitches {
+						newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+							c,
+							h.concurrencyHelper,
+							subject.UserID,
+							subject.Concurrency,
+							subject.QueuePriority,
+							userReleaseFunc,
+							reqStream,
+							&streamStarted,
+							failoverErr,
+						)
+						if waitErr != nil {
+							reqLog.Info("openai_chat_completions.account_select_wait_interrupted", zap.Error(waitErr))
+							return
+						}
+						if waited {
+							if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+								userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+							} else {
+								userReleaseFunc = newUserReleaseFunc
+							}
+							switchCount = 0
+							failedAccountIDs = make(map[int64]struct{})
+							sameAccountRetryCount = make(map[int64]int)
+							lastFailoverErr = nil
+							continue
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}

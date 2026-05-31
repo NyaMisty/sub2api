@@ -205,6 +205,33 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				return
 			}
 			if lastFailoverErr != nil {
+				newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+					c,
+					h.concurrencyHelper,
+					subject.UserID,
+					subject.Concurrency,
+					subject.QueuePriority,
+					userReleaseFunc,
+					parsed.Stream,
+					&streamStarted,
+					lastFailoverErr,
+				)
+				if waitErr != nil {
+					reqLog.Info("openai.images.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+						userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+					} else {
+						userReleaseFunc = newUserReleaseFunc
+					}
+					switchCount = 0
+					failedAccountIDs = make(map[int64]struct{})
+					sameAccountRetryCount = make(map[int64]int)
+					lastFailoverErr = nil
+					continue
+				}
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else {
 				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
@@ -341,6 +368,33 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
 					if switchCount >= maxAccountSwitches {
+						newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+							c,
+							h.concurrencyHelper,
+							subject.UserID,
+							subject.Concurrency,
+							subject.QueuePriority,
+							userReleaseFunc,
+							parsed.Stream,
+							&streamStarted,
+							failoverErr,
+						)
+						if waitErr != nil {
+							reqLog.Info("openai.images.account_select_wait_interrupted", zap.Error(waitErr))
+							return
+						}
+						if waited {
+							if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+								userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+							} else {
+								userReleaseFunc = newUserReleaseFunc
+							}
+							switchCount = 0
+							failedAccountIDs = make(map[int64]struct{})
+							sameAccountRetryCount = make(map[int64]int)
+							lastFailoverErr = nil
+							continue
+						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}

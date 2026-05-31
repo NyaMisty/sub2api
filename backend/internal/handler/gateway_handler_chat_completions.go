@@ -203,6 +203,30 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			case FailoverCanceled:
 				return
 			default:
+				newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+					c,
+					h.concurrencyHelper,
+					subject.UserID,
+					subject.Concurrency,
+					subject.QueuePriority,
+					userReleaseFunc,
+					reqStream,
+					&streamStarted,
+					fs.LastFailoverErr,
+				)
+				if waitErr != nil {
+					reqLog.Info("gateway.cc.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+						userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+					} else {
+						userReleaseFunc = newUserReleaseFunc
+					}
+					fs.ResetAfterWaitRetry()
+					continue
+				}
 				if fs.LastFailoverErr != nil {
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 				} else {
@@ -282,6 +306,30 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
+					newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+						c,
+						h.concurrencyHelper,
+						subject.UserID,
+						subject.Concurrency,
+						subject.QueuePriority,
+						userReleaseFunc,
+						reqStream,
+						&streamStarted,
+						fs.LastFailoverErr,
+					)
+					if waitErr != nil {
+						reqLog.Info("gateway.cc.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						if h.concurrencyHelper.SupportsAuthorityUserQueue() {
+							userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+						} else {
+							userReleaseFunc = newUserReleaseFunc
+						}
+						fs.ResetAfterWaitRetry()
+						continue
+					}
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 					return
 				case FailoverCanceled:

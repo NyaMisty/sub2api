@@ -70,6 +70,23 @@ func TestNewFailoverState(t *testing.T) {
 	})
 }
 
+func TestFailoverStateResetAfterWaitRetry(t *testing.T) {
+	fs := NewFailoverState(4, true)
+	fs.SwitchCount = 3
+	fs.FailedAccountIDs[101] = struct{}{}
+	fs.SameAccountRetryCount[101] = 2
+	fs.LastFailoverErr = newTestFailoverErr(401, true, false)
+	fs.ForceCacheBilling = true
+
+	fs.ResetAfterWaitRetry()
+
+	require.Equal(t, 0, fs.SwitchCount)
+	require.Empty(t, fs.FailedAccountIDs)
+	require.Empty(t, fs.SameAccountRetryCount)
+	require.Nil(t, fs.LastFailoverErr)
+	require.True(t, fs.ForceCacheBilling, "force cache billing state should be preserved across wait retries")
+}
+
 // ---------------------------------------------------------------------------
 // sleepWithContext 测试
 // ---------------------------------------------------------------------------

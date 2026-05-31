@@ -2,12 +2,15 @@ package handler
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type selectionRetryState struct {
@@ -113,6 +116,41 @@ func (s *selectionRetryState) WaitForUserSlotReacquire(
 	return nil, false, err
 }
 
+func (s *selectionRetryState) WaitForRetryableFailoverReacquire(
+	c *gin.Context,
+	helper *ConcurrencyHelper,
+	userID int64,
+	userConcurrency int,
+	queuePriority int,
+	currentReleaseFunc func(),
+	isStream bool,
+	streamStarted *bool,
+	failoverErr *service.UpstreamFailoverError,
+) (func(), bool, error) {
+	if s == nil {
+		return currentReleaseFunc, false, nil
+	}
+	if !shouldRetryWaitQueueAfterFailover(failoverErr) {
+		return currentReleaseFunc, false, nil
+	}
+	if c != nil && c.Request != nil {
+		logger.FromContext(c.Request.Context()).Info("gateway.failover_wait_queue_retry",
+			zap.Int("upstream_status", failoverErr.StatusCode),
+			zap.Duration("timeout", s.timeout),
+		)
+	}
+	return s.WaitForUserSlotReacquire(
+		c,
+		helper,
+		userID,
+		userConcurrency,
+		queuePriority,
+		currentReleaseFunc,
+		isStream,
+		streamStarted,
+	)
+}
+
 func selectionRetryTimeoutFromConfig(cfg *config.Config) time.Duration {
 	if cfg != nil && cfg.Gateway.Scheduling.FallbackWaitTimeout > 0 {
 		return cfg.Gateway.Scheduling.FallbackWaitTimeout
@@ -128,6 +166,13 @@ func shouldRetryNoAvailableSelectionError(err error) bool {
 		return false
 	}
 	return !strings.Contains(strings.ToLower(err.Error()), "channel pricing restriction")
+}
+
+func shouldRetryWaitQueueAfterFailover(failoverErr *service.UpstreamFailoverError) bool {
+	if failoverErr == nil {
+		return false
+	}
+	return failoverErr.StatusCode == http.StatusUnauthorized
 }
 
 func (h *GatewayHandler) shouldRetryGatewayNoAvailableSelection(ctx context.Context, groupID *int64, requestedModel string, err error) (bool, error) {

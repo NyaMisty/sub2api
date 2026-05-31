@@ -397,6 +397,30 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			case FailoverCanceled:
 				return
 			default: // FailoverExhausted
+				newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+					c,
+					geminiConcurrency,
+					authSubject.UserID,
+					authSubject.Concurrency,
+					authSubject.QueuePriority,
+					userReleaseFunc,
+					stream,
+					&streamStarted,
+					fs.LastFailoverErr,
+				)
+				if waitErr != nil {
+					reqLog.Info("gemini.account_select_wait_interrupted", zap.Error(waitErr))
+					return
+				}
+				if waited {
+					if geminiConcurrency.SupportsAuthorityUserQueue() {
+						userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+					} else {
+						userReleaseFunc = newUserReleaseFunc
+					}
+					fs.ResetAfterWaitRetry()
+					continue
+				}
 				h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
 				return
 			}
@@ -503,6 +527,30 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
+					newUserReleaseFunc, waited, waitErr := retryState.WaitForRetryableFailoverReacquire(
+						c,
+						geminiConcurrency,
+						authSubject.UserID,
+						authSubject.Concurrency,
+						authSubject.QueuePriority,
+						userReleaseFunc,
+						stream,
+						&streamStarted,
+						fs.LastFailoverErr,
+					)
+					if waitErr != nil {
+						reqLog.Info("gemini.account_select_wait_interrupted", zap.Error(waitErr))
+						return
+					}
+					if waited {
+						if geminiConcurrency.SupportsAuthorityUserQueue() {
+							userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), newUserReleaseFunc)
+						} else {
+							userReleaseFunc = newUserReleaseFunc
+						}
+						fs.ResetAfterWaitRetry()
+						continue
+					}
 					h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
 					return
 				case FailoverCanceled:
