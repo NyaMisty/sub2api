@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -71,6 +72,11 @@ type userWaitAuthorityCache interface {
 	EnqueueUserWait(ctx context.Context, ticket *UserWaitTicket, maxWait int) (bool, error)
 	PollUserWait(ctx context.Context, requestID string) (*UserWaitPollResult, error)
 	CompleteUserWait(ctx context.Context, requestID string, finalState UserWaitState) error
+}
+
+type userWaitWakeCache interface {
+	PublishUserWaitWake(ctx context.Context) error
+	SubscribeUserWaitWake(ctx context.Context) (<-chan struct{}, func(), error)
 }
 
 func (s *ConcurrencyService) SupportsUserWaitAuthorityQueue() bool {
@@ -211,5 +217,105 @@ func (s *ConcurrencyService) CompleteUserWaitBestEffort(requestID string, finalS
 	defer cancel()
 	if err := s.CompleteUserWait(bgCtx, requestID, finalState); err != nil && !errors.Is(err, ErrUserWaitQueueUnavailable) {
 		logger.LegacyPrintf("service.concurrency", "Warning: complete user wait failed for %s (%s): %v", requestID, finalState, err)
+	}
+}
+
+func (s *ConcurrencyService) PublishUserWaitWake(ctx context.Context) {
+	if s == nil || s.cache == nil {
+		return
+	}
+	s.broadcastUserWaitWake()
+	cacheWithWake, ok := s.cache.(userWaitWakeCache)
+	if !ok {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := cacheWithWake.PublishUserWaitWake(ctx); err != nil {
+		logger.LegacyPrintf("service.concurrency", "Warning: publish user wait wake failed: %v", err)
+	}
+}
+
+func (s *ConcurrencyService) SubscribeUserWaitWake(ctx context.Context) (<-chan struct{}, func()) {
+	if s == nil {
+		return nil, func() {}
+	}
+	ch := make(chan struct{}, 1)
+
+	s.userWaitWakeMu.Lock()
+	if s.userWaitWakeSubscribers == nil {
+		s.userWaitWakeSubscribers = make(map[chan struct{}]struct{})
+	}
+	s.userWaitWakeSubscribers[ch] = struct{}{}
+	s.ensureUserWaitWakeListenerLocked()
+	s.userWaitWakeMu.Unlock()
+
+	var once sync.Once
+	var stopCtxCallback func() bool
+	var unsubscribe func()
+	unsubscribe = func() {
+		once.Do(func() {
+			s.userWaitWakeMu.Lock()
+			delete(s.userWaitWakeSubscribers, ch)
+			s.userWaitWakeMu.Unlock()
+			if stopCtxCallback != nil {
+				_ = stopCtxCallback()
+			}
+		})
+	}
+	if ctx != nil {
+		stopCtxCallback = context.AfterFunc(ctx, func() {
+			unsubscribe()
+		})
+	}
+	return ch, unsubscribe
+}
+
+func (s *ConcurrencyService) ensureUserWaitWakeListenerLocked() {
+	if s == nil || s.userWaitWakeListening || s.cache == nil {
+		return
+	}
+	if _, ok := s.cache.(userWaitWakeCache); !ok {
+		return
+	}
+	s.userWaitWakeListening = true
+	go s.runUserWaitWakeListener()
+}
+
+func (s *ConcurrencyService) runUserWaitWakeListener() {
+	for {
+		cacheWithWake, ok := s.cache.(userWaitWakeCache)
+		if !ok {
+			return
+		}
+		ctx := context.Background()
+		wakeCh, unsubscribe, err := cacheWithWake.SubscribeUserWaitWake(ctx)
+		if err != nil {
+			logger.LegacyPrintf("service.concurrency", "Warning: subscribe user wait wake failed: %v", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		for range wakeCh {
+			s.broadcastUserWaitWake()
+		}
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func (s *ConcurrencyService) broadcastUserWaitWake() {
+	if s == nil {
+		return
+	}
+	s.userWaitWakeMu.Lock()
+	defer s.userWaitWakeMu.Unlock()
+	for ch := range s.userWaitWakeSubscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
 }

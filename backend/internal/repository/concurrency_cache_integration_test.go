@@ -281,6 +281,26 @@ func (s *ConcurrencyCacheSuite) TestUserWaitAuthorityQueue_PriorityFIFOAndBypass
 	require.Equal(s.T(), 0, s.mustUserWaitCount(high2.UserID))
 }
 
+func (s *ConcurrencyCacheSuite) TestUserWaitWake_PublishReachesSubscriber() {
+	cache, ok := s.cache.(*concurrencyCache)
+	require.True(s.T(), ok)
+
+	wakeCh, unsubscribe, err := cache.SubscribeUserWaitWake(s.ctx)
+	require.NoError(s.T(), err)
+	defer unsubscribe()
+
+	require.NoError(s.T(), cache.PublishUserWaitWake(s.ctx))
+
+	require.Eventually(s.T(), func() bool {
+		select {
+		case <-wakeCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+}
+
 func (s *ConcurrencyCacheSuite) TestAccountWaitQueue_IncrementAndDecrement() {
 	accountID := int64(30)
 	waitKey := fmt.Sprintf("%s%d", accountWaitKeyPrefix, accountID)

@@ -18,6 +18,8 @@ type accountRepoStubForClearAccountError struct {
 	clearAntigravityCalls    int
 	clearModelRateLimitCalls int
 	clearTempUnschedCalls    int
+	setSchedulableCalls      int
+	setSchedulableValues     []bool
 }
 
 func (r *accountRepoStubForClearAccountError) GetByID(ctx context.Context, id int64) (*Account, error) {
@@ -55,6 +57,13 @@ func (r *accountRepoStubForClearAccountError) ClearTempUnschedulable(ctx context
 	return nil
 }
 
+func (r *accountRepoStubForClearAccountError) SetSchedulable(ctx context.Context, id int64, schedulable bool) error {
+	r.setSchedulableCalls++
+	r.setSchedulableValues = append(r.setSchedulableValues, schedulable)
+	r.account.Schedulable = schedulable
+	return nil
+}
+
 func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *testing.T) {
 	until := time.Now().Add(10 * time.Minute)
 	resetAt := time.Now().Add(5 * time.Minute)
@@ -85,4 +94,46 @@ func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *tes
 	require.Nil(t, updated.TempUnschedulableUntil)
 	require.Empty(t, updated.TempUnschedulableReason)
 	require.Equal(t, []int64{31}, blocker.clearedIDs)
+}
+
+func TestAdminService_SetAccountSchedulableTrue_ClearsSchedulingBlock(t *testing.T) {
+	repo := &accountRepoStubForClearAccountError{
+		account: &Account{
+			ID:          32,
+			Platform:    PlatformAnthropic,
+			Type:        AccountTypeOAuth,
+			Schedulable: false,
+		},
+	}
+	blocker := &runtimeBlockRecorder{}
+	svc := &adminServiceImpl{accountRepo: repo, runtimeBlocker: blocker}
+
+	updated, err := svc.SetAccountSchedulable(context.Background(), 32, true)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.True(t, updated.Schedulable)
+	require.Equal(t, 1, repo.setSchedulableCalls)
+	require.Equal(t, []bool{true}, repo.setSchedulableValues)
+	require.Equal(t, []int64{32}, blocker.clearedIDs)
+}
+
+func TestAdminService_SetAccountSchedulableFalse_DoesNotClearSchedulingBlock(t *testing.T) {
+	repo := &accountRepoStubForClearAccountError{
+		account: &Account{
+			ID:          33,
+			Platform:    PlatformAnthropic,
+			Type:        AccountTypeOAuth,
+			Schedulable: true,
+		},
+	}
+	blocker := &runtimeBlockRecorder{}
+	svc := &adminServiceImpl{accountRepo: repo, runtimeBlocker: blocker}
+
+	updated, err := svc.SetAccountSchedulable(context.Background(), 33, false)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.False(t, updated.Schedulable)
+	require.Equal(t, 1, repo.setSchedulableCalls)
+	require.Equal(t, []bool{false}, repo.setSchedulableValues)
+	require.Empty(t, blocker.clearedIDs)
 }

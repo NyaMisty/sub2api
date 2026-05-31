@@ -5,12 +5,27 @@ package service
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+type runtimeBlockWakeCacheStub struct {
+	stubConcurrencyCacheForTest
+	publishCalls atomic.Int64
+}
+
+func (c *runtimeBlockWakeCacheStub) PublishUserWaitWake(context.Context) error {
+	c.publishCalls.Add(1)
+	return nil
+}
+
+func (c *runtimeBlockWakeCacheStub) SubscribeUserWaitWake(context.Context) (<-chan struct{}, func(), error) {
+	return make(chan struct{}), func() {}, nil
+}
 
 func TestOpenAI429FastPath_MarksOAuthAccountCoolingDown(t *testing.T) {
 	svc := &OpenAIGatewayService{}
@@ -103,6 +118,29 @@ func TestOpenAIRuntimeBlock_ClearAccountSchedulingBlock(t *testing.T) {
 
 	svc.ClearAccountSchedulingBlock(account.ID)
 	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
+func TestOpenAIRuntimeBlock_ClearAccountSchedulingBlockPublishesUserWaitWake(t *testing.T) {
+	cache := &runtimeBlockWakeCacheStub{}
+	svc := &OpenAIGatewayService{
+		concurrencyService: NewConcurrencyService(cache),
+	}
+
+	svc.ClearAccountSchedulingBlockWithContext(context.Background(), 48)
+
+	require.Equal(t, int64(1), cache.publishCalls.Load())
+}
+
+func TestOpenAIRuntimeBlock_ExpiredBlockPublishesUserWaitWake(t *testing.T) {
+	cache := &runtimeBlockWakeCacheStub{}
+	svc := &OpenAIGatewayService{
+		concurrencyService: NewConcurrencyService(cache),
+	}
+	account := &Account{ID: 49, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	svc.openaiAccountRuntimeBlockUntil.Store(account.ID, time.Now().Add(-time.Second))
+
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Equal(t, int64(1), cache.publishCalls.Load())
 }
 
 func TestShouldStopOpenAIOAuth429Failover_OnlyDuringStorm(t *testing.T) {

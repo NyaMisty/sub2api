@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -14,6 +15,7 @@ const (
 	userWaitSequenceKey            = "qos:user_wait:seq"
 	userWaitRequestKeyPrefix       = "qos:user_wait:req:"
 	userWaitGrantKeyPrefix         = "qos:user_wait:grant:"
+	userWaitWakeChannel            = "qos:user_wait:wake"
 	userWaitCompletedEntryTTLInSec = 60
 )
 
@@ -491,4 +493,39 @@ func (c *concurrencyCache) CompleteUserWait(ctx context.Context, requestID strin
 		userWaitCompletedEntryTTLInSec,
 	).Result()
 	return err
+}
+
+func (c *concurrencyCache) PublishUserWaitWake(ctx context.Context) error {
+	return c.rdb.Publish(ctx, userWaitWakeChannel, "wake").Err()
+}
+
+func (c *concurrencyCache) SubscribeUserWaitWake(ctx context.Context) (<-chan struct{}, func(), error) {
+	pubsub := c.rdb.Subscribe(ctx, userWaitWakeChannel)
+	if _, err := pubsub.Receive(ctx); err != nil {
+		_ = pubsub.Close()
+		return nil, nil, err
+	}
+
+	out := make(chan struct{}, 1)
+	messages := pubsub.Channel()
+
+	var once sync.Once
+	closeSubscription := func() {
+		once.Do(func() {
+			_ = pubsub.Close()
+		})
+	}
+
+	go func() {
+		defer close(out)
+		defer closeSubscription()
+		for range messages {
+			select {
+			case out <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	return out, closeSubscription, nil
 }

@@ -2917,6 +2917,9 @@ func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, 
 	if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
 		return nil, err
 	}
+	if schedulable && s.runtimeBlocker != nil {
+		s.runtimeBlocker.ClearAccountSchedulingBlockWithContext(ctx, id)
+	}
 	updated, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err

@@ -99,6 +99,10 @@ type ConcurrencyService struct {
 	accountLoadCacheMu  sync.RWMutex
 	accountLoadCache    map[string]cachedAccountLoadBatch
 	accountLoadGroup    singleflight.Group
+
+	userWaitWakeMu          sync.Mutex
+	userWaitWakeSubscribers map[chan struct{}]struct{}
+	userWaitWakeListening   bool
 }
 
 type cachedAccountLoadBatch struct {

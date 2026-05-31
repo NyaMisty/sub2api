@@ -29,6 +29,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
+	"go.uber.org/zap"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqljson"
@@ -730,6 +731,14 @@ func (r *accountRepository) SetError(ctx context.Context, id int64, errorMsg str
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue set error failed: account=%d err=%v", id, err)
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
+	logger.FromContext(ctx).Warn("account.status_persisted",
+		zap.Int64("account_id", id),
+		zap.String("operation", "SetError"),
+		zap.String("status", service.StatusError),
+		zap.Bool("schedulable", false),
+		zap.String("error_message", errorMsg),
+		zap.Strings("fields_updated", []string{"status", "error_message", "schedulable"}),
+	)
 	return nil
 }
 
@@ -1074,6 +1083,13 @@ func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetA
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue rate limit failed: account=%d err=%v", id, err)
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
+	logger.FromContext(ctx).Warn("account.status_persisted",
+		zap.Int64("account_id", id),
+		zap.String("operation", "SetRateLimited"),
+		zap.Time("rate_limited_at", now),
+		zap.Time("rate_limit_reset_at", resetAt),
+		zap.Strings("fields_updated", []string{"rate_limited_at", "rate_limit_reset_at"}),
+	)
 	return nil
 }
 
@@ -1141,6 +1157,12 @@ func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until t
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue overload failed: account=%d err=%v", id, err)
 	}
+	logger.FromContext(ctx).Warn("account.status_persisted",
+		zap.Int64("account_id", id),
+		zap.String("operation", "SetOverloaded"),
+		zap.Time("overload_until", until),
+		zap.Strings("fields_updated", []string{"overload_until"}),
+	)
 	return nil
 }
 
@@ -1161,6 +1183,13 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue temp unschedulable failed: account=%d err=%v", id, err)
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
+	logger.FromContext(ctx).Warn("account.status_persisted",
+		zap.Int64("account_id", id),
+		zap.String("operation", "SetTempUnschedulable"),
+		zap.Time("temp_unschedulable_until", until),
+		zap.String("temp_unschedulable_reason", reason),
+		zap.Strings("fields_updated", []string{"temp_unschedulable_until", "temp_unschedulable_reason"}),
+	)
 	return nil
 }
 
@@ -1284,6 +1313,12 @@ func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedu
 	if !schedulable {
 		r.syncSchedulerAccountSnapshot(ctx, id)
 	}
+	logger.FromContext(ctx).Info("account.status_persisted",
+		zap.Int64("account_id", id),
+		zap.String("operation", "SetSchedulable"),
+		zap.Bool("schedulable", schedulable),
+		zap.Strings("fields_updated", []string{"schedulable"}),
+	)
 	return nil
 }
 

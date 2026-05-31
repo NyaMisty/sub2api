@@ -485,6 +485,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							reqLog.Warn("openai.pool_mode_same_account_retry",
 								zap.Int64("account_id", account.ID),
 								zap.Int("upstream_status", failoverErr.StatusCode),
+								zap.String("upstream_error_message", summarizeUpstreamFailoverError(failoverErr.ResponseBody)),
 								zap.Int("retry_limit", retryLimit),
 								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
 							)
@@ -538,6 +539,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					reqLog.Warn("openai.upstream_failover_switching",
 						zap.Int64("account_id", account.ID),
 						zap.Int("upstream_status", failoverErr.StatusCode),
+						zap.String("upstream_error_message", summarizeUpstreamFailoverError(failoverErr.ResponseBody)),
 						zap.Int("switch_count", switchCount),
 						zap.Int("max_switches", maxAccountSwitches),
 					)
@@ -1015,6 +1017,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 							reqLog.Warn("openai_messages.pool_mode_same_account_retry",
 								zap.Int64("account_id", account.ID),
 								zap.Int("upstream_status", failoverErr.StatusCode),
+								zap.String("upstream_error_message", summarizeUpstreamFailoverError(failoverErr.ResponseBody)),
 								zap.Int("retry_limit", retryLimit),
 								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
 							)
@@ -1068,6 +1071,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					reqLog.Warn("openai_messages.upstream_failover_switching",
 						zap.Int64("account_id", account.ID),
 						zap.Int("upstream_status", failoverErr.StatusCode),
+						zap.String("upstream_error_message", summarizeUpstreamFailoverError(failoverErr.ResponseBody)),
 						zap.Int("switch_count", switchCount),
 						zap.Int("max_switches", maxAccountSwitches),
 					)
@@ -1862,6 +1866,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				reqLog.Warn("openai.websocket_upstream_failover_switching",
 					zap.Int64("account_id", account.ID),
 					zap.Int("upstream_status", failoverErr.StatusCode),
+					zap.String("upstream_error_message", summarizeUpstreamFailoverError(failoverErr.ResponseBody)),
 					zap.Int("switch_count", switchCount),
 					zap.Int("max_switches", maxAccountSwitches),
 				)

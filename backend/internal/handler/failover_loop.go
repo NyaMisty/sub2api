@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -94,6 +95,7 @@ func (s *FailoverState) HandleFailoverError(
 		logger.FromContext(ctx).Warn("gateway.failover_same_account_retry",
 			zap.Int64("account_id", accountID),
 			zap.Int("upstream_status", failoverErr.StatusCode),
+			zap.String("upstream_error_message", summarizeUpstreamFailoverError(failoverErr.ResponseBody)),
 			zap.Int("same_account_retry_count", s.SameAccountRetryCount[accountID]),
 			zap.Int("same_account_retry_max", maxSameAccountRetries),
 		)
@@ -121,6 +123,7 @@ func (s *FailoverState) HandleFailoverError(
 	logger.FromContext(ctx).Warn("gateway.failover_switch_account",
 		zap.Int64("account_id", accountID),
 		zap.Int("upstream_status", failoverErr.StatusCode),
+		zap.String("upstream_error_message", summarizeUpstreamFailoverError(failoverErr.ResponseBody)),
 		zap.Int("switch_count", s.SwitchCount),
 		zap.Int("max_switches", s.MaxSwitches),
 	)
@@ -170,6 +173,19 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 // 粘性会话切换账号、或上游明确标记时，将 input_tokens 转为 cache_read 计费。
 func needForceCacheBilling(hasBoundSession bool, failoverErr *service.UpstreamFailoverError) bool {
 	return hasBoundSession || (failoverErr != nil && failoverErr.ForceCacheBilling)
+}
+
+func summarizeUpstreamFailoverError(body []byte) string {
+	msg := strings.TrimSpace(service.ExtractUpstreamErrorMessage(body))
+	if msg == "" {
+		msg = strings.TrimSpace(string(body))
+	}
+	if msg == "" {
+		return ""
+	}
+	msg = strings.ReplaceAll(msg, "\n", "\\n")
+	msg = strings.ReplaceAll(msg, "\r", "\\r")
+	return truncateString(msg, 512)
 }
 
 // sleepWithContext 等待指定时长，返回 false 表示 context 已取消。

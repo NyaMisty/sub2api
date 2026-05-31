@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -109,6 +110,55 @@ func (c *trackingConcurrencyCache) CleanupStaleProcessSlots(_ context.Context, p
 	return c.cleanupErr
 }
 
+type wakeConcurrencyCacheForTest struct {
+	stubConcurrencyCacheForTest
+
+	mu             sync.Mutex
+	publishCalls   int
+	subscribeCalls int
+	subscribers    []chan struct{}
+}
+
+func (c *wakeConcurrencyCacheForTest) PublishUserWaitWake(context.Context) error {
+	c.mu.Lock()
+	c.publishCalls++
+	subscribers := append([]chan struct{}(nil), c.subscribers...)
+	c.mu.Unlock()
+
+	for _, ch := range subscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (c *wakeConcurrencyCacheForTest) SubscribeUserWaitWake(context.Context) (<-chan struct{}, func(), error) {
+	ch := make(chan struct{}, 1)
+
+	c.mu.Lock()
+	c.subscribeCalls++
+	c.subscribers = append(c.subscribers, ch)
+	c.mu.Unlock()
+
+	var once sync.Once
+	unsubscribe := func() {
+		once.Do(func() {
+			c.mu.Lock()
+			for i, subscriber := range c.subscribers {
+				if subscriber == ch {
+					c.subscribers = append(c.subscribers[:i], c.subscribers[i+1:]...)
+					break
+				}
+			}
+			c.mu.Unlock()
+			close(ch)
+		})
+	}
+	return ch, unsubscribe, nil
+}
+
 func TestCleanupStaleProcessSlots_NilCache(t *testing.T) {
 	svc := &ConcurrencyService{cache: nil}
 	require.NoError(t, svc.CleanupStaleProcessSlots(context.Background()))
@@ -119,6 +169,46 @@ func TestCleanupStaleProcessSlots_DelegatesPrefix(t *testing.T) {
 	svc := NewConcurrencyService(cache)
 	require.NoError(t, svc.CleanupStaleProcessSlots(context.Background()))
 	require.Equal(t, RequestIDPrefix(), cache.cleanupPrefix)
+}
+
+func TestUserWaitWake_SubscribeAndPublishFanout(t *testing.T) {
+	cache := &wakeConcurrencyCacheForTest{}
+	svc := NewConcurrencyService(cache)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch1, unsub1 := svc.SubscribeUserWaitWake(ctx)
+	defer unsub1()
+	ch2, unsub2 := svc.SubscribeUserWaitWake(ctx)
+	defer unsub2()
+
+	svc.PublishUserWaitWake(ctx)
+
+	require.Eventually(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return cache.subscribeCalls == 1
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		select {
+		case <-ch1:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		select {
+		case <-ch2:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+
+	cache.mu.Lock()
+	require.Equal(t, 1, cache.publishCalls)
+	cache.mu.Unlock()
 }
 
 func TestAcquireAccountSlot_Success(t *testing.T) {

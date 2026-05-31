@@ -442,6 +442,14 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 	}
 
 	ctx := c.Request.Context()
+	var wakeCh <-chan struct{}
+	var wakeUnsubscribe func()
+	if h.concurrencyService != nil {
+		wakeCh, wakeUnsubscribe = h.concurrencyService.SubscribeUserWaitWake(ctx)
+	}
+	if wakeUnsubscribe != nil {
+		defer wakeUnsubscribe()
+	}
 	ticket, err := h.concurrencyService.EnqueueUserWait(ctx, service.UserWaitRequest{
 		UserID:         userID,
 		MaxConcurrency: maxConcurrency,
@@ -475,11 +483,16 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 			delay = remaining
 		}
 		if delay > 0 {
-			if err := h.WaitWithPing(c, delay, isStream, streamStarted); err != nil {
+			woke, err := h.waitWithPingOrWake(c, delay, wakeCh, isStream, streamStarted)
+			if err != nil {
 				finish(service.UserWaitStateCanceled)
 				return nil, false, err
 			}
-			backoff = nextBackoff(delay)
+			if woke {
+				backoff = initialBackoff
+			} else {
+				backoff = nextBackoff(delay)
+			}
 		}
 	}
 	for {
@@ -534,11 +547,66 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 		if delay > remaining {
 			delay = remaining
 		}
-		if err := h.WaitWithPing(c, delay, isStream, streamStarted); err != nil {
+		woke, err := h.waitWithPingOrWake(c, delay, wakeCh, isStream, streamStarted)
+		if err != nil {
 			finish(service.UserWaitStateCanceled)
 			return nil, false, err
 		}
-		backoff = nextBackoff(delay)
+		if woke {
+			backoff = initialBackoff
+		} else {
+			backoff = nextBackoff(delay)
+		}
+	}
+}
+
+func (h *ConcurrencyHelper) waitWithPingOrWake(c *gin.Context, wait time.Duration, wakeCh <-chan struct{}, isStream bool, streamStarted *bool) (bool, error) {
+	if wait <= 0 {
+		return false, nil
+	}
+	if wakeCh == nil {
+		return false, h.WaitWithPing(c, wait, isStream, streamStarted)
+	}
+
+	ctx := c.Request.Context()
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+
+	needPing := isStream && h.pingFormat != ""
+	var pingCh <-chan time.Time
+	var pingTicker *time.Ticker
+	if needPing {
+		var ok bool
+		_, ok = c.Writer.(http.Flusher)
+		if !ok {
+			return false, fmt.Errorf("streaming not supported")
+		}
+		pingTicker = time.NewTicker(h.pingInterval)
+		defer pingTicker.Stop()
+		pingCh = pingTicker.C
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-wakeCh:
+			return true, nil
+		case <-deadline.C:
+			return false, nil
+		case <-pingCh:
+			if !*streamStarted {
+				c.Header("Content-Type", "text/event-stream")
+				c.Header("Cache-Control", "no-cache")
+				c.Header("Connection", "keep-alive")
+				c.Header("X-Accel-Buffering", "no")
+				*streamStarted = true
+			}
+			if _, err := fmt.Fprint(c.Writer, string(h.pingFormat)); err != nil {
+				return false, err
+			}
+			c.Writer.(http.Flusher).Flush()
+		}
 	}
 }
 

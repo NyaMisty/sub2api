@@ -129,6 +129,26 @@ func (s *authorityQueueCacheStub) CompleteUserWait(_ context.Context, _ string, 
 	return nil
 }
 
+type authorityQueueWakeCacheStub struct {
+	authorityQueueCacheStub
+	wakeCh chan struct{}
+}
+
+func (s *authorityQueueWakeCacheStub) PublishUserWaitWake(context.Context) error {
+	select {
+	case s.wakeCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *authorityQueueWakeCacheStub) SubscribeUserWaitWake(context.Context) (<-chan struct{}, func(), error) {
+	if s.wakeCh == nil {
+		s.wakeCh = make(chan struct{}, 1)
+	}
+	return s.wakeCh, func() {}, nil
+}
+
 func TestConcurrencyHelperAcquireUserSlotWithWait_UsesAuthorityQueue(t *testing.T) {
 	cache := &authorityQueueCacheStub{
 		tryAcquireAllowed: false,
@@ -191,6 +211,56 @@ func TestSelectionRetryStateWaitForUserSlotReacquire_ReleasesAndRequeues(t *test
 	require.Equal(t, 1, cache.enqueueCalls)
 	require.GreaterOrEqual(t, cache.pollCalls, 1)
 	require.Equal(t, 1, cache.acquireCalls)
+	require.Equal(t, []service.UserWaitState{service.UserWaitStateDone}, cache.completeStates)
+	cache.mu.Unlock()
+}
+
+func TestWaitForUserSlotTurn_WakeInterruptsSleepAndRepolls(t *testing.T) {
+	cache := &authorityQueueWakeCacheStub{
+		authorityQueueCacheStub: authorityQueueCacheStub{
+			enqueueAllowed: true,
+			pollStates: []service.UserWaitState{
+				service.UserWaitStateQueued,
+				service.UserWaitStateGranted,
+			},
+		},
+		wakeCh: make(chan struct{}, 1),
+	}
+	helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, 50*time.Millisecond)
+	c, _ := newHelperTestContext("POST", "/v1/messages")
+	streamStarted := false
+
+	done := make(chan struct{})
+	var release func()
+	var err error
+	go func() {
+		release, _, err = helper.waitForUserSlotTurn(
+			c,
+			123,
+			2,
+			10,
+			2*time.Second,
+			500*time.Millisecond,
+			service.UserWaitReasonUserSlot,
+			false,
+			&streamStarted,
+		)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	helper.concurrencyService.PublishUserWaitWake(c.Request.Context())
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("wait did not wake in time")
+	}
+	require.NoError(t, err)
+	require.NotNil(t, release)
+
+	cache.mu.Lock()
+	require.GreaterOrEqual(t, cache.pollCalls, 2)
 	require.Equal(t, []service.UserWaitState{service.UserWaitStateDone}, cache.completeStates)
 	cache.mu.Unlock()
 }
