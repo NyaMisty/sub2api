@@ -3143,6 +3143,7 @@ export default {
         expiresAt: '过期时间',
         actions: '操作'
       },
+      usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。',
       allPrivacyModes: '全部Privacy状态',
       privacyUnset: '未设置',
       privacyTrainingOff: '已关闭训练数据共享',
@@ -3613,6 +3614,12 @@ export default {
       interceptWarmupRequestsDesc: '启用后，标题生成等预热请求将返回 mock 响应，不消耗上游 token',
       autoPauseOnExpired: '过期自动暂停调度',
       autoPauseOnExpiredDesc: '启用后，账号过期将自动暂停调度',
+	  autoPause5hThreshold: '5h 用量阈值(%)',
+	  autoPause7dThreshold: '7d 用量阈值(%)',
+	  autoPauseThresholdHint: '留空或填 0 表示使用全局默认阈值（在运维设置中配置）；填具体值则覆盖全局默认。达到阈值后仅在调度时跳过账号，不修改 schedulable。',
+	  autoPause5hDisabled: '禁用 5h 自动暂停',
+	  autoPause7dDisabled: '禁用 7d 自动暂停',
+	  autoPauseDisabledHint: '开启后该账号永不进入自动暂停（即使全局默认阈值已配置）。',
       // Quota control (Anthropic OAuth/SetupToken only)
       quotaControl: {
         title: '配额控制',
@@ -4671,6 +4678,7 @@ export default {
       ipAddress: 'IP',
       clickToViewBalance: '点击查看充值记录',
       failedToLoadUser: '加载用户信息失败',
+      userDeletedBadge: '已删除',
       cleanup: {
         button: '清理',
         title: '清理使用记录',
@@ -5349,6 +5357,11 @@ export default {
         aggregation: '预聚合任务',
         enableAggregation: '启用预聚合任务',
         aggregationHint: '预聚合可提升长时间窗口查询性能',
+        openaiQuotaAutoPause: 'OpenAI 账号配额自动暂停',
+        openaiQuotaAutoPauseHint: '当 OpenAI 账号 5h / 7d 用量达到阈值时，调度会自动跳过该账号；窗口滚动后自动恢复。账号级阈值优先于此全局默认值。',
+        openaiQuotaAutoPauseDefault5h: '默认 5h 用量阈值 (%)',
+        openaiQuotaAutoPauseDefault7d: '默认 7d 用量阈值 (%)',
+        openaiQuotaAutoPauseThresholdHint: '取值 0-100，留空或 0 表示不启用全局默认阈值。',
         errorFiltering: '错误过滤',
         ignoreCountTokensErrors: '忽略 count_tokens 错误',
         ignoreCountTokensErrorsHint: '启用后，count_tokens 请求的错误将不会写入错误日志。',
@@ -5380,7 +5393,8 @@ export default {
           slaMinPercentRange: 'SLA最低百分比必须在0-100之间',
           ttftP99MaxRange: 'TTFT P99最大值必须大于等于0',
           requestErrorRateMaxRange: '请求错误率最大值必须在0-100之间',
-          upstreamErrorRateMaxRange: '上游错误率最大值必须在0-100之间'
+          upstreamErrorRateMaxRange: '上游错误率最大值必须在0-100之间',
+          openaiQuotaAutoPauseRange: 'OpenAI 配额自动暂停阈值必须在 0-100 之间'
         }
       },
       concurrency: {
