@@ -118,6 +118,10 @@ func claudeCodeBodyMapFromContextCache(c *gin.Context) map[string]any {
 const (
 	// maxConcurrencyWait 等待并发槽位的最大时间
 	maxConcurrencyWait = 30 * time.Second
+	// userWaitTotalTimeout 是同一请求的用户级 wait 硬上限。
+	userWaitTotalTimeout = 15 * time.Second
+	// userWaitDeadlineContextKey 保存请求级 wait 截止时间，供重入复用。
+	userWaitDeadlineContextKey = "gateway.user_wait_deadline"
 	// defaultPingInterval 流式响应等待时发送 ping 的默认间隔
 	defaultPingInterval = 10 * time.Second
 	// initialBackoff 初始退避时间
@@ -441,6 +445,12 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 		return nil, false, nil
 	}
 
+	deadline := userWaitDeadline(c, timeout)
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return nil, false, nil
+	}
+
 	ctx := c.Request.Context()
 	var wakeCh <-chan struct{}
 	var wakeUnsubscribe func()
@@ -456,11 +466,12 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 		MaxWait:        service.CalculateMaxWait(maxConcurrency),
 		Priority:       queuePriority,
 		Reason:         reason,
-		Timeout:        timeout,
+		Timeout:        remaining,
 	})
 	if err != nil {
 		return nil, false, err
 	}
+	setUserWaitDeadline(c, deadline)
 
 	completed := false
 	finish := func(state service.UserWaitState) {
@@ -479,7 +490,7 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 	backoff := initialBackoff
 	if initialDelay > 0 {
 		delay := initialDelay
-		if remaining := time.Until(ticket.Deadline); delay > remaining {
+		if remaining := time.Until(deadline); delay > remaining {
 			delay = remaining
 		}
 		if delay > 0 {
@@ -534,7 +545,7 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 			return nil, false, fmt.Errorf("unknown user wait state: %s", state)
 		}
 
-		remaining := time.Until(ticket.Deadline)
+		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			finish(service.UserWaitStateTimedOut)
 			return nil, false, nil
@@ -558,6 +569,38 @@ func (h *ConcurrencyHelper) waitForUserSlotTurn(
 			backoff = nextBackoff(delay)
 		}
 	}
+}
+
+func userWaitDeadline(c *gin.Context, timeout time.Duration) time.Time {
+	now := time.Now()
+	deadline := now.Add(userWaitTotalTimeout)
+	if timeout > 0 {
+		timeoutDeadline := now.Add(timeout)
+		if timeoutDeadline.Before(deadline) {
+			deadline = timeoutDeadline
+		}
+	}
+	if c == nil {
+		return deadline
+	}
+	if existing, ok := c.Get(userWaitDeadlineContextKey); ok {
+		if existingDeadline, ok := existing.(time.Time); ok && !existingDeadline.IsZero() && existingDeadline.Before(deadline) {
+			deadline = existingDeadline
+		}
+	}
+	return deadline
+}
+
+func setUserWaitDeadline(c *gin.Context, deadline time.Time) {
+	if c == nil || deadline.IsZero() {
+		return
+	}
+	if existing, ok := c.Get(userWaitDeadlineContextKey); ok {
+		if existingDeadline, ok := existing.(time.Time); ok && !existingDeadline.IsZero() && existingDeadline.Before(deadline) {
+			deadline = existingDeadline
+		}
+	}
+	c.Set(userWaitDeadlineContextKey, deadline)
 }
 
 func (h *ConcurrencyHelper) waitWithPingOrWake(c *gin.Context, wait time.Duration, wakeCh <-chan struct{}, isStream bool, streamStarted *bool) (bool, error) {

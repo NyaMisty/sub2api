@@ -51,6 +51,11 @@ func TestSelectionRetryStateWait_StopsAfterTimeout(t *testing.T) {
 	require.False(t, waited)
 }
 
+func TestNewSelectionRetryState_CapsTimeoutAtUserWaitTotalTimeout(t *testing.T) {
+	state := newSelectionRetryState(30 * time.Second)
+	require.Equal(t, userWaitTotalTimeout, state.timeout)
+}
+
 func TestShouldRetryNoAvailableSelectionError(t *testing.T) {
 	t.Parallel()
 

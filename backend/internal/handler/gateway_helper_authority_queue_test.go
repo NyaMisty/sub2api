@@ -264,3 +264,44 @@ func TestWaitForUserSlotTurn_WakeInterruptsSleepAndRepolls(t *testing.T) {
 	require.Equal(t, []service.UserWaitState{service.UserWaitStateDone}, cache.completeStates)
 	cache.mu.Unlock()
 }
+
+func TestUserWaitDeadline_ReusedAcrossWaitEntries(t *testing.T) {
+	c, _ := newHelperTestContext("POST", "/v1/messages")
+
+	first := userWaitDeadline(c, 30*time.Second)
+	require.WithinDuration(t, time.Now().Add(userWaitTotalTimeout), first, 150*time.Millisecond)
+
+	setUserWaitDeadline(c, first)
+	second := userWaitDeadline(c, 30*time.Second)
+	require.Equal(t, first, second)
+}
+
+func TestWaitForUserSlotTurn_ExpiredDeadlineReturnsWithoutRequeue(t *testing.T) {
+	cache := &authorityQueueCacheStub{
+		enqueueAllowed: true,
+	}
+	helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Millisecond)
+	c, _ := newHelperTestContext("POST", "/v1/messages")
+	c.Set(userWaitDeadlineContextKey, time.Now().Add(-time.Second))
+	streamStarted := false
+
+	release, waited, err := helper.waitForUserSlotTurn(
+		c,
+		123,
+		2,
+		10,
+		30*time.Second,
+		0,
+		service.UserWaitReasonUserSlot,
+		false,
+		&streamStarted,
+	)
+	require.NoError(t, err)
+	require.False(t, waited)
+	require.Nil(t, release)
+
+	cache.mu.Lock()
+	require.Zero(t, cache.enqueueCalls)
+	require.Zero(t, cache.pollCalls)
+	cache.mu.Unlock()
+}

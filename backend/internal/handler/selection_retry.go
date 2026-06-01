@@ -24,6 +24,9 @@ func newSelectionRetryState(timeout time.Duration) *selectionRetryState {
 	if timeout <= 0 {
 		timeout = maxConcurrencyWait
 	}
+	if timeout > userWaitTotalTimeout {
+		timeout = userWaitTotalTimeout
+	}
 	return &selectionRetryState{
 		timeout: timeout,
 		backoff: initialBackoff,
